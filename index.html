@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ENBPA District Administration — Economic & MSME Survey</title>
+<title>ENBPA District Office — Economic & MSME Survey</title>
 <meta name="theme-color" content="#0E1613">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png" type="image/png">
@@ -547,7 +547,7 @@ body.locked .topbar, body.locked .bottomnav{ display:none; }
   <div class="brand">
     <div class="seal"><img src="logo.svg" alt="ENBPA Division of Commerce & Industry logo"></div>
     <div class="brand-text">
-      <div class="t1" id="brand-district-label">ENBPA &middot; District Administration</div>
+      <div class="t1" id="brand-district-label">ENBPA &middot; District Office</div>
       <div class="t2">Economic &amp; MSME Survey</div>
     </div>
   </div>
@@ -579,6 +579,7 @@ body.locked .topbar, body.locked .bottomnav{ display:none; }
   <div id="records-list-mode">
     <div class="search-bar">
       <input type="text" id="search-input" placeholder="Search household, village, business name…">
+      <button class="btn btn-outline" id="btn-add-manual" title="Add a record manually — for entries with no paper form, e.g. taken over the phone" style="flex-shrink:0; padding:10px 14px;">+ Add</button>
     </div>
     <div style="display:flex; align-items:center; gap:8px; margin-bottom:10px;">
       <label for="sort-select" style="font-size:12.5px; color:var(--text-muted); flex-shrink:0;">Sort:</label>
@@ -595,6 +596,11 @@ body.locked .topbar, body.locked .bottomnav{ display:none; }
     <div id="records-list-container"></div>
   </div>
   <div id="records-summary-mode" hidden></div>
+</div>
+
+<div id="view-wizard" class="view" hidden>
+  <div class="stepper" id="stepper"></div>
+  <div id="wizard-body"></div>
 </div>
 
 <div id="view-detail" class="view" hidden>

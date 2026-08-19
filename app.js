@@ -116,8 +116,10 @@ function stepsForStatus(status) {
 }
 
 /* ---------------------------- storage layer ----------------------------
-   Read-only district access - recordsCache is populated by whatever each
-   view fetches (Dashboard, Records, Summary), never written back. */
+   District accounts can add and edit their own district's records (never
+   delete - RLS has no delete policy for this role at all, so it's blocked
+   at the database regardless of what this app ever does). recordsCache is
+   kept in sync on every write so existing synchronous reads keep working. */
 function loadRecords() { return recordsCache; }
 
 async function fetchAllRecords() {
@@ -126,6 +128,91 @@ async function fetchAllRecords() {
   return (data || []).map(row => row.data);
 }
 
+// Single-record save - updates just this one row remotely (RLS enforces it
+// can only ever be a row already in this account's own district) and merges
+// it into whatever's currently cached.
+async function upsertRecordRemote(record) {
+  const idx = recordsCache.findIndex(r => r.id === record.id);
+  if (idx >= 0) recordsCache[idx] = record; else recordsCache.push(record);
+  const { error } = await sb.from('msme_records').upsert(recordToRow(record), { onConflict: 'id' });
+  if (error) throw error;
+}
+async function checkDuplicateRemote(rec) {
+  try {
+    let query = sb.from('msme_records').select('id, date_collected')
+      .eq('district', rec.location.district)
+      .eq('llg', rec.location.llg)
+      .eq('household_no', rec.location.householdNo)
+      .is('deleted_at', null)
+      .neq('id', rec.id || '');
+    if (rec.location.ward) query = query.eq('ward', rec.location.ward);
+    const { data, error } = await query.limit(1);
+    if (error) throw error;
+    return (data && data[0]) || null;
+  } catch (e) {
+    console.error('Duplicate check failed (continuing without it):', e);
+    return null;
+  }
+}
+function recordToRow(r) {
+  return {
+    id: r.id,
+    district: r.location.district || null,
+    llg: r.location.llg || null,
+    village: r.location.village || null,
+    ward: r.location.ward || null,
+    household_no: r.location.householdNo || null,
+    business_status: r.businessStatus || null,
+    date_collected: r.location.dateCollected || null,
+    business_name: (r.business && r.business.name) || null,
+    contact_person: r.location.contactPerson || null,
+    data: r
+  };
+}
+
+function saveDraft(d) {
+  try { d == null ? localStorage.removeItem(DRAFT_KEY) : localStorage.setItem(DRAFT_KEY, JSON.stringify(d)); }
+  catch (e) { console.error('Draft save failed:', e); }
+}
+async function readDraft() {
+  try { const raw = localStorage.getItem(DRAFT_KEY); return raw ? JSON.parse(raw) : null; }
+  catch (e) { return null; }
+}
+function clearDraft() { localStorage.removeItem(DRAFT_KEY); }
+
+function uid() {
+  return 'r_' + Date.now().toString(36) + '_' + Math.random().toString(36).slice(2, 8);
+}
+
+function newRecord() {
+  return {
+    id: uid(),
+    createdAt: new Date().toISOString(),
+    updatedAt: new Date().toISOString(),
+    source: 'district_manual', // distinguishes this from field-collected records for anyone reviewing data provenance later
+    location: { district: myDistrict, llg: '', village: '', ward: '', householdNo: '', dateCollected: todayStr(), contactPerson: '', mobile: '', postalAddress: '' },
+    employment: { numFormallyEmployed: '', employedMembers: [], unemployedMembers: [], comments: '' },
+    businessStatus: '', // 'formal' | 'informal' | 'none'
+    business: {
+      activities: { general: [], dpi: [], tourism: [], nrmd: [], fisheries: [], commTowerOwner: '', othersSpecify: '' },
+      name: '', dateCommenced: '', owner: '', otherLocation: '',
+      ipaRegistered: '', regForms: [], licenses: [], comment: '',
+      loanAccess: '', loans: [], loanReasons: ''
+    },
+    development: {
+      trainingAttended: '', trainingHistory: {}, specificTrainingRequired: '',
+      trainingTypesRequired: [], assistanceRequired: [], assistanceOtherSpecify: '', comment: ''
+    },
+    economic: {
+      casualsCount: '', casualsYears: '', permanentCount: '', permanentYears: '',
+      casualWageK: '', permanentWageK: '',
+      turnoverBracket: '', turnoverAmount: '', expensesBracket: '', expensesAmount: '',
+      initialCapital: '', assetsValue: '', otherInvestments: '', otherInvestmentsSpecify: ''
+    },
+    cashCrops: { fixed: {}, others: [], comments: '' },
+    informal: { entries: [], comments: '' }
+  };
+}
 function todayStr() { return new Date().toISOString().slice(0, 10); }
 
 /* ------------------------------- app state ------------------------------ */
@@ -162,11 +249,20 @@ async function restoreNavState(state) {
   // needs to sign back in first, and any cached data underneath is stale.
   if (document.body.classList.contains('locked')) return;
 
+  // Only ask if there is genuinely still a draft to lose. A successful save
+  // already clears it before leaving, and a stale wizard entry sitting
+  // further back in history (from a past completed or cancelled survey)
+  // has nothing left to discard either - both cases should leave silently.
+  if (currentView === 'wizard') {
+    const stillHasDraft = await readDraft();
+    if (stillHasDraft && confirm('Discard this survey draft?')) clearDraft();
+  }
+
   suppressNavPush = true;
   try {
     if (!state || !state.view) { switchView('dashboard'); return; }
-    recordsDrillLevel = state.drillLevel || 'districts';
-    recordsDrillDistrict = state.drillDistrict || null;
+    recordsDrillLevel = state.drillLevel || 'llgs';
+    recordsDrillDistrict = state.drillDistrict || myDistrict;
     recordsDrillLLG = state.drillLLG || null;
     recordsDrillWard = state.drillWard || null;
     flaggedCategory = state.flaggedCategory || null;
@@ -346,11 +442,21 @@ async function goToSummary(opts = {}) {
   }
 }
 
+let autosaveInterval = null;
+function startAutosaveInterval() {
+  stopAutosaveInterval();
+  autosaveInterval = setInterval(() => { if (draft) saveDraft(draft); }, 4000);
+}
+function stopAutosaveInterval() {
+  if (autosaveInterval) { clearInterval(autosaveInterval); autosaveInterval = null; }
+}
+
 function switchView(view) {
   currentView = view;
+  if (view !== 'wizard') stopAutosaveInterval();
   const twoPane = window.innerWidth >= 900 && view === 'detail';
   document.body.classList.toggle('two-pane', twoPane);
-  ['dashboard', 'records', 'detail', 'transfer', 'dataquality'].forEach(v => {
+  ['dashboard', 'records', 'wizard', 'detail', 'transfer', 'dataquality'].forEach(v => {
     let shouldHide = (v !== view);
     if (twoPane && v === 'records') shouldHide = false; // keep the list visible alongside the detail panel
     $('#view-' + v).hidden = shouldHide;
@@ -369,7 +475,11 @@ function switchView(view) {
 
 $all('.bottomnav button').forEach(btn => {
   btn.addEventListener('click', () => {
-    switchView(btn.dataset.view);
+    const v = btn.dataset.view;
+    if (currentView === 'wizard') {
+      if (!confirm('Leave this record? Your progress is autosaved — find it again from Records → "+ Add".')) return;
+    }
+    switchView(v);
   });
 });
 
@@ -377,6 +487,44 @@ async function fetchRecordById(id) {
   const { data, error } = await sb.from('msme_records').select('data, created_at').eq('id', id).single();
   if (error) throw error;
   return { ...data.data, _uploadedAt: data.created_at };
+}
+$('#btn-add-manual').addEventListener('click', startNewSurvey);
+
+async function startNewSurvey() {
+  const existingDraft = await readDraft();
+  if (existingDraft && !editingExisting) {
+    if (confirm('You have an unfinished survey saved on this device. Continue it? (Cancel starts a new blank survey)')) {
+      draft = existingDraft;
+      editingExisting = false;
+      stepIndex = 0;
+      switchView('wizard');
+      renderWizard();
+      startAutosaveInterval();
+      return;
+    } else {
+      clearDraft();
+    }
+  }
+  draft = newRecord();
+  editingExisting = false;
+  stepIndex = 0;
+  switchView('wizard');
+  renderWizard();
+  startAutosaveInterval();
+}
+
+async function editRecord(id) {
+  let rec = recordsCache.find(r => r.id === id);
+  if (!rec) {
+    try { rec = await fetchRecordById(id); }
+    catch (e) { console.error('Failed to load record for edit:', e); toast('Could not load record — check your connection'); return; }
+  }
+  draft = JSON.parse(JSON.stringify(rec));
+  editingExisting = true;
+  stepIndex = 0;
+  switchView('wizard');
+  renderWizard();
+  startAutosaveInterval();
 }
 
 /* ------------------------------- dashboard -------------------------------- */
@@ -1287,8 +1435,10 @@ async function openDetail(id) {
       </div>
     </div>
     ${r.source === 'hq_manual' ? `<div class="warn-box" style="font-size:12px;">✎ Entered manually via PHQ — not from a field paper form.</div>` : ''}
+    ${r.source === 'district_manual' ? `<div class="warn-box" style="font-size:12px;">✎ Entered manually via the District Office — not from a field paper form.</div>` : ''}
     <div class="card">
       <div style="display:flex; gap:8px; flex-wrap:wrap;">
+        <button class="btn btn-primary" id="btn-detail-edit" style="flex:1;">Edit</button>
         <button class="btn btn-outline" id="btn-detail-print" style="flex:1;">Print</button>
         <button class="btn btn-outline" id="btn-detail-export" style="flex:1;">Export</button>
       </div>
@@ -1296,6 +1446,7 @@ async function openDetail(id) {
     ${sections}
     <button class="btn btn-outline btn-full" id="btn-detail-back">← Back to records</button>
   `;
+  $('#btn-detail-edit').onclick = () => editRecord(r.id);
   $('#btn-detail-back').onclick = () => switchView('records');
   $('#btn-detail-export').onclick = () => downloadFile(`msme-${recordDisplayName(r).replace(/[,\s]+/g,'-')}.json`, JSON.stringify(r, null, 2), 'application/json');
   $('#btn-detail-print').onclick = () => { window.print(); };
@@ -1325,6 +1476,548 @@ const fmtLicense = l => `${l.type || 'License'} — Receipt: ${l.receiptNo || '�
 const fmtLoan = l => `${l.institution || 'Lender'} — K${l.amount || '—'}, Date: ${l.date || '—'}, On schedule: ${l.onSchedule || '—'}`;
 const fmtOtherCrop = c => `${c.name || 'Crop'} — ${c.blocks || 0} blocks, ${c.trees || 0} trees`;
 const fmtInformal = e => `${e.ownerName || 'Owner'} — ${e.activityType || 'activity'} (Est. ${e.yearEstablished || '—'}, K${e.monthlyTurnover || '—'}/mo)`;
+
+function renderWizard() {
+  const steps = stepsForStatus(draft.businessStatus);
+  if (stepIndex >= steps.length) stepIndex = steps.length - 1;
+  const stepId = steps[stepIndex];
+
+  $('#stepper').innerHTML = steps.map((id, i) => {
+    const cls = i === stepIndex ? 'active' : (i < stepIndex ? 'done' : '');
+    return `<div class="step-badge ${cls}" data-i="${i}">${STEP_DEFS[id].letter}</div>`;
+  }).join('');
+  $all('.step-badge', $('#stepper')).forEach(b => b.addEventListener('click', () => {
+    stepIndex = parseInt(b.dataset.i, 10);
+    renderWizard();
+  }));
+
+  const body = $('#wizard-body');
+  body.innerHTML = `<div class="card"><h3>${STEP_DEFS[stepId].letter}. ${STEP_DEFS[stepId].title}</h3><div id="step-content" style="margin-top:12px;"></div>
+    <div class="wizard-nav">
+      ${stepIndex > 0 ? '<button class="btn btn-outline" id="btn-wiz-back">Back</button>' : '<button class="btn btn-outline" id="btn-wiz-cancel">Cancel</button>'}
+      <button class="btn btn-primary" id="btn-wiz-next">${stepId === 'REVIEW' ? 'Save record' : 'Continue'}</button>
+    </div>
+  </div>`;
+
+  const content = $('#step-content');
+  const renderers = { A: renderStepA, B: renderStepB, C: renderStepC, D: renderStepD, E: renderStepE, F: renderStepF, G8: renderStepG8, G: renderStepG, REVIEW: renderStepReview };
+  renderers[stepId](content);
+
+  const backBtn = $('#btn-wiz-back');
+  if (backBtn) backBtn.addEventListener('click', () => { stepIndex--; renderWizard(); });
+  const cancelBtn = $('#btn-wiz-cancel');
+  if (cancelBtn) cancelBtn.addEventListener('click', () => {
+    history.back(); // triggers the same discard-confirmation restoreNavState already handles
+  });
+  $('#btn-wiz-next').addEventListener('click', () => {
+    if (stepId === 'REVIEW') { saveDraftRecord(); return; }
+    saveDraft(draft);
+    const newSteps = stepsForStatus(draft.businessStatus);
+    if (stepIndex < newSteps.length - 1) stepIndex++;
+    renderWizard();
+  });
+}
+
+function bindInputs(root) {
+  $all('[data-bind]', root).forEach(el => {
+    const path = el.dataset.bind;
+    const val = getPath(draft, path);
+    if (el.type === 'checkbox') el.checked = !!val;
+    else el.value = val == null ? '' : val;
+    const evt = (el.tagName === 'SELECT' || el.type === 'date') ? 'change' : 'input';
+    el.addEventListener(evt, () => {
+      setPath(draft, path, el.type === 'checkbox' ? el.checked : el.value);
+    });
+  });
+}
+
+function ynToggle(path, label, hint) {
+  const val = getPath(draft, path);
+  return `<div class="field">
+    <label>${esc(label)}</label>
+    <div class="yn-toggle" data-yn="${path}">
+      <button type="button" class="sel-yes ${val === 'Yes' ? 'on' : ''}" data-v="Yes">Yes</button>
+      <button type="button" class="sel-no ${val === 'No' ? 'on' : ''}" data-v="No">No</button>
+    </div>
+    ${hint ? `<div class="hint">${esc(hint)}</div>` : ''}
+  </div>`;
+}
+function bindYN(root) {
+  $all('[data-yn]', root).forEach(group => {
+    const path = group.dataset.yn;
+    $all('button', group).forEach(btn => btn.addEventListener('click', () => {
+      setPath(draft, path, btn.dataset.v);
+      $all('button', group).forEach(b => b.classList.remove('on'));
+      btn.classList.add('on');
+      if (group.dataset.rerender) renderWizard();
+    }));
+  });
+}
+
+/* ---- Step A: Location ---- */
+function renderStepA(el) {
+  el.innerHTML = `
+    <div class="field">
+      <label>District <span class="opt">(fixed for this account)</span></label>
+      <input type="text" value="${esc(myDistrict)}" disabled style="background:var(--surface-2); color:var(--text-muted);">
+    </div>
+    <div class="field-row">
+      <div class="field"><label>LLG</label>
+        <select data-bind="location.llg" id="loc-llg-select">
+          ${llgOptionsHTML(myDistrict, draft.location.llg)}
+        </select>
+      </div>
+      <div class="field"><label>Ward</label>
+        <select data-bind="location.ward" id="loc-ward-select">
+          ${wardOptionsHTML(draft.location.llg, draft.location.ward)}
+        </select>
+      </div>
+    </div>
+    <div class="field"><label>Village</label><input type="text" data-bind="location.village"></div>
+    <div class="field-row">
+      <div class="field"><label>Household No.</label><input type="text" data-bind="location.householdNo"></div>
+      <div class="field"><label>Date data collected</label><input type="date" data-bind="location.dateCollected"></div>
+    </div>
+    <div class="field"><label>Contact person & mobile number</label>
+      <div class="field-row">
+        <input type="text" placeholder="Name" data-bind="location.contactPerson">
+        <input type="tel" placeholder="Mobile number" data-bind="location.mobile">
+      </div>
+    </div>
+    <div class="field"><label>Postal address</label><textarea data-bind="location.postalAddress"></textarea></div>
+  `;
+  draft.location.district = myDistrict; // always, regardless of whatever was there before
+  bindInputs(el);
+  $('#loc-llg-select').addEventListener('change', () => {
+    draft.location.ward = ''; // old ward almost certainly doesn't belong to the newly picked LLG
+    $('#loc-ward-select').innerHTML = wardOptionsHTML(draft.location.llg, draft.location.ward);
+  });
+}
+
+/* ---- Step B: Employment & Education + business status ---- */
+function renderStepB(el) {
+  el.innerHTML = `
+    <div class="field"><label>i. How many family members are formally employed currently?</label>
+      <input type="number" min="0" data-bind="employment.numFormallyEmployed"></div>
+
+    <div class="field"><label>ii. Employed family members <span class="opt">(Table 1)</span></label></div>
+    <div id="employed-table"></div>
+
+    <div class="field"><label>iii. Unemployed family members (18+, holding trade/tertiary qualification, not students) <span class="opt">(Table 2)</span></label></div>
+    <div id="unemployed-table"></div>
+
+    <div class="field"><label>Comments</label><textarea data-bind="employment.comments"></textarea></div>
+
+    <div class="field">
+      <label>iv. Does the household or family own or run a formal business?</label>
+      <div class="status-choice">
+        <button type="button" class="status-opt ${draft.businessStatus === 'formal' ? 'on' : ''}" data-status="formal">
+          <div class="radio"></div><div><strong>Yes — formal business</strong><span>Continue to Sections C, D & E</span></div>
+        </button>
+        <button type="button" class="status-opt ${draft.businessStatus === 'informal' ? 'on' : ''}" data-status="informal">
+          <div class="radio"></div><div><strong>Informal sector</strong><span>Continue to business loan question & Section G</span></div>
+        </button>
+        <button type="button" class="status-opt ${draft.businessStatus === 'none' ? 'on' : ''}" data-status="none">
+          <div class="radio"></div><div><strong>No business</strong><span>Continue to Section F (Cash crops)</span></div>
+        </button>
+      </div>
+    </div>
+  `;
+  bindInputs(el);
+  renderRepeatTable($('#employed-table'), draft.employment.employedMembers,
+    ['name', 'qualification', 'institution', 'yearGraduated', 'employer', 'grossPay'],
+    ['Name', 'Highest qualification', 'Institution', 'Year graduated', 'Employer & location', 'Gross monthly pay (K)'],
+    () => renderStepB(el));
+  renderRepeatTable($('#unemployed-table'), draft.employment.unemployedMembers,
+    ['name', 'qualification', 'institution', 'yearGraduated', 'comments'],
+    ['Name', 'Highest qualification', 'Institution', 'Year graduated', 'Comments'],
+    () => renderStepB(el));
+
+  // Prevents exactly the bug that created an orphaned expenses figure on an
+  // informal record: someone starts as formal, fills in Section E, then
+  // switches to informal before saving. Section E stops being shown from
+  // that point on, but the values were still sitting in the draft and got
+  // saved anyway - invisible and uneditable afterward, since informal's own
+  // wizard path and detail view never render that section at all.
+  //
+  // Only clears a section when it WAS visible under the old status and
+  // ISN'T under the new one - a step that stays visible, or was never
+  // reached, is never touched.
+  function clearFieldsForStepsNoLongerShown(oldStatus, newStatus) {
+    const oldSteps = new Set(stepsForStatus(oldStatus));
+    const newSteps = new Set(stepsForStatus(newStatus));
+    const removed = [...oldSteps].filter(s => !newSteps.has(s));
+
+    if (removed.includes('E')) {
+      draft.economic = {
+        casualsCount: '', casualsYears: '', permanentCount: '', permanentYears: '',
+        casualWageK: '', permanentWageK: '',
+        turnoverBracket: '', turnoverAmount: '', expensesBracket: '', expensesAmount: '',
+        initialCapital: '', assetsValue: '', otherInvestments: '', otherInvestmentsSpecify: ''
+      };
+    }
+    if (removed.includes('D')) {
+      draft.development = {
+        trainingAttended: '', trainingHistory: {}, specificTrainingRequired: '',
+        trainingTypesRequired: [], assistanceRequired: [], assistanceOtherSpecify: '', comment: ''
+      };
+    }
+    if (removed.includes('C')) {
+      // The formal-only fields go regardless. loanAccess/loans/loanReasons
+      // only get cleared too if G8 (informal's own loan step) also isn't in
+      // the new path - if it IS, those fields are still relevant there.
+      draft.business.name = ''; draft.business.dateCommenced = ''; draft.business.owner = '';
+      draft.business.otherLocation = ''; draft.business.ipaRegistered = '';
+      draft.business.regForms = []; draft.business.licenses = []; draft.business.comment = '';
+      if (!newSteps.has('G8')) {
+        draft.business.loanAccess = ''; draft.business.loans = []; draft.business.loanReasons = '';
+      }
+    }
+    if (removed.includes('G')) {
+      draft.informal = { entries: [], comments: '' };
+    }
+  }
+
+  $all('.status-opt', el).forEach(btn => btn.addEventListener('click', () => {
+    const oldStatus = draft.businessStatus;
+    const newStatus = btn.dataset.status;
+    if (oldStatus && oldStatus !== newStatus) clearFieldsForStepsNoLongerShown(oldStatus, newStatus);
+    draft.businessStatus = newStatus;
+    renderStepB(el);
+  }));
+}
+
+/* generic repeatable-row table builder */
+function renderRepeatTable(container, arr, fields, labels, onChange) {
+  container.innerHTML = arr.map((row, idx) => `
+    <div class="repeat-row" data-idx="${idx}">
+      <button type="button" class="rm-row" data-rm="${idx}">✕</button>
+      <div class="field-row">
+        ${fields.map((f, i) => `<div class="field" style="margin-bottom:8px;"><label>${esc(labels[i])}</label><input type="text" data-f="${f}" value="${esc(row[f] || '')}"></div>`).join('')}
+      </div>
+    </div>
+  `).join('') + `<button type="button" class="add-row-btn">+ Add entry</button>`;
+
+  $all('.repeat-row', container).forEach(rowEl => {
+    const idx = parseInt(rowEl.dataset.idx, 10);
+    $all('input', rowEl).forEach(inp => inp.addEventListener('input', () => { arr[idx][inp.dataset.f] = inp.value; }));
+  });
+  $all('.rm-row', container).forEach(btn => btn.addEventListener('click', () => {
+    arr.splice(parseInt(btn.dataset.rm, 10), 1);
+    onChange();
+  }));
+  $('.add-row-btn', container).addEventListener('click', () => {
+    const blank = {}; fields.forEach(f => blank[f] = '');
+    arr.push(blank);
+    onChange();
+  });
+}
+
+/* ---- Step C: Business Background ---- */
+function renderStepC(el) {
+  el.innerHTML = `
+    <div class="field"><label>1. Business activities undertaken</label></div>
+    ${Object.entries(BUSINESS_ACTIVITIES).map(([key, group]) => `
+      <div class="subgroup">
+        <div class="sg-title">${esc(group.label)}</div>
+        <div class="check-list">
+          ${group.items.map(item => `
+            <div class="check-item">
+              <input type="checkbox" id="act-${key}-${item.replace(/\W+/g,'')}" data-act="${key}" data-item="${esc(item)}" ${draft.business.activities[key].includes(item) ? 'checked' : ''}>
+              <label for="act-${key}-${item.replace(/\W+/g,'')}">${esc(item)}</label>
+            </div>
+          `).join('')}
+        </div>
+      </div>
+    `).join('')}
+    <div class="field"><label>Communication Towers — specify owner <span class="opt">(if applicable)</span></label>
+      <input type="text" data-bind="business.activities.commTowerOwner"></div>
+    <div class="field"><label>Other activities — specify</label>
+      <input type="text" data-bind="business.activities.othersSpecify"></div>
+
+    <div class="field"><label>2. Name of business</label><input type="text" data-bind="business.name"></div>
+    <div class="field-row">
+      <div class="field"><label>3. Date business commenced</label><input type="date" data-bind="business.dateCommenced"></div>
+      <div class="field"><label>4. Business owner</label>
+        <select data-bind="business.owner"><option value="">Select…</option><option value="Citizen">Citizen</option><option value="Foreign">Foreign (refer IPA form)</option><option value="Joint venture">Joint venture</option></select>
+      </div>
+    </div>
+    <div class="field"><label>5. Any other business location? If yes, where?</label><input type="text" data-bind="business.otherLocation"></div>
+
+    ${ynToggle('business.ipaRegistered', '6. IPA Registration?', 'If yes, complete the registration table below')}
+    <div id="regforms-table"></div>
+
+    <div class="field"><label>7. Types of licenses held</label></div>
+    <div id="licenses-table"></div>
+    <div class="field"><label>Comment</label><textarea data-bind="business.comment"></textarea></div>
+
+    ${ynToggle('business.loanAccess', '8. Are you able to access a business loan?')}
+    <div id="loans-table"></div>
+    <div class="field" id="loan-reasons-field" style="display:${draft.business.loanAccess === 'No' ? 'block' : 'none'}">
+      <label>If no, state reasons why you are not able to access business loans</label>
+      <textarea data-bind="business.loanReasons"></textarea>
+    </div>
+  `;
+  bindInputs(el);
+  bindYN(el);
+
+  $all('[data-act]', el).forEach(cb => cb.addEventListener('change', () => {
+    const key = cb.dataset.act, item = cb.dataset.item;
+    const arr = draft.business.activities[key];
+    const i = arr.indexOf(item);
+    if (cb.checked && i === -1) arr.push(item);
+    if (!cb.checked && i !== -1) arr.splice(i, 1);
+  }));
+
+  renderRepeatTable($('#regforms-table'), draft.business.regForms,
+    ['form', 'dateReg', 'regNo', 'expiry'], ['Form (Company/Business Name/etc.)', 'Date registered', 'Registration No.', 'Expiry date'],
+    () => renderStepC(el));
+  renderRepeatTable($('#licenses-table'), draft.business.licenses,
+    ['type', 'receiptNo', 'expiry'], ['License type', 'Receipt No.', 'Expiry date'],
+    () => renderStepC(el));
+  renderRepeatTable($('#loans-table'), draft.business.loans,
+    ['institution', 'amount', 'date', 'onSchedule'], ['Bank / financial institution', 'Loan amount (K)', 'Date of loan', 'Repayment on schedule? (Yes/No)'],
+    () => renderStepC(el));
+
+  $all('[data-yn="business.loanAccess"] button', el).forEach(b => b.addEventListener('click', () => {
+    $('#loan-reasons-field').style.display = draft.business.loanAccess === 'No' ? 'block' : 'none';
+  }));
+}
+
+/* ---- Step D: Development Assistance ---- */
+function renderStepD(el) {
+  el.innerHTML = `
+    ${ynToggle('development.trainingAttended', '1. Business training workshop attended?')}
+    <div class="field"><label>Type of training attended (tick where appropriate, add facilitator)</label></div>
+    <div class="check-list">
+      ${TRAINING_HISTORY_TYPES.map(t => `
+        <div class="check-item">
+          <input type="checkbox" data-th="${esc(t)}" ${draft.development.trainingHistory[t] !== undefined ? 'checked' : ''}>
+          <label>${esc(t)}</label>
+          <input type="text" style="width:38%; padding:6px 8px; border:1px solid var(--border); border-radius:6px;" placeholder="Facilitator"
+            value="${esc(draft.development.trainingHistory[t] || '')}" data-thf="${esc(t)}" ${draft.development.trainingHistory[t] === undefined ? 'disabled' : ''}>
+        </div>
+      `).join('')}
+    </div>
+
+    <div class="field"><label>2. Specify other specific trainings required</label><textarea data-bind="development.specificTrainingRequired"></textarea></div>
+    <div class="field"><label>Type of training required (tick where appropriate)</label></div>
+    <div class="check-list">
+      ${TRAINING_REQUIRED_TYPES.map(t => `
+        <div class="check-item"><input type="checkbox" data-tr="${esc(t)}" ${draft.development.trainingTypesRequired.includes(t) ? 'checked' : ''}><label>${esc(t)}</label></div>
+      `).join('')}
+    </div>
+
+    <div class="field"><label>Type of assistance required (tick where appropriate)</label></div>
+    <div class="check-list">
+      ${ASSISTANCE_TYPES.map(t => `
+        <div class="check-item"><input type="checkbox" data-as="${esc(t)}" ${draft.development.assistanceRequired.includes(t) ? 'checked' : ''}><label>${esc(t)}</label></div>
+      `).join('')}
+    </div>
+    <div class="field"><label>Other assistance — specify</label><input type="text" data-bind="development.assistanceOtherSpecify"></div>
+    <div class="field"><label>Comment</label><textarea data-bind="development.comment"></textarea></div>
+  `;
+  bindInputs(el);
+  bindYN(el);
+  $all('[data-th]', el).forEach(cb => cb.addEventListener('change', () => {
+    const t = cb.dataset.th;
+    const fInput = $(`[data-thf="${CSS.escape(t)}"]`, el);
+    if (cb.checked) { draft.development.trainingHistory[t] = fInput.value || ''; fInput.disabled = false; }
+    else { delete draft.development.trainingHistory[t]; fInput.disabled = true; }
+  }));
+  $all('[data-thf]', el).forEach(inp => inp.addEventListener('input', () => {
+    draft.development.trainingHistory[inp.dataset.thf] = inp.value;
+  }));
+  $all('[data-tr]', el).forEach(cb => cb.addEventListener('change', () => toggleArrItem(draft.development.trainingTypesRequired, cb.dataset.tr, cb.checked)));
+  $all('[data-as]', el).forEach(cb => cb.addEventListener('change', () => toggleArrItem(draft.development.assistanceRequired, cb.dataset.as, cb.checked)));
+}
+function toggleArrItem(arr, item, on) {
+  const i = arr.indexOf(item);
+  if (on && i === -1) arr.push(item);
+  if (!on && i !== -1) arr.splice(i, 1);
+}
+
+/* ---- Step E: Economic Output ---- */
+function renderStepE(el) {
+  el.innerHTML = `
+    <div class="field"><label>1(a). No. of casuals / years employed</label>
+      <div class="field-row"><input type="number" placeholder="No. of casuals" data-bind="economic.casualsCount"><input type="text" placeholder="Years employed" data-bind="economic.casualsYears"></div>
+    </div>
+    <div class="field"><label>1(b). No. of permanent / years employed</label>
+      <div class="field-row"><input type="number" placeholder="No. of permanent" data-bind="economic.permanentCount"><input type="text" placeholder="Years employed" data-bind="economic.permanentYears"></div>
+    </div>
+    <div class="field"><label>1(c). Employees' fortnightly wages (Kina)</label>
+      <div class="field-row"><input type="number" placeholder="Casual K" data-bind="economic.casualWageK"><input type="number" placeholder="Permanent K" data-bind="economic.permanentWageK"></div>
+    </div>
+
+    <div class="field"><label>2.1 Monthly turnover</label>
+      <div class="turnover-grid">
+        ${TURNOVER_BRACKETS.map(([code, label]) => `
+          <div class="turnover-opt ${draft.economic.turnoverBracket === code ? 'on' : ''}">
+            <input type="radio" name="turnover" value="${code}" ${draft.economic.turnoverBracket === code ? 'checked' : ''} data-turnover-radio>
+            <div class="to-label">${esc(label)}</div>
+            <input type="number" placeholder="Amount K" data-bind="economic.turnoverAmount" ${draft.economic.turnoverBracket === code ? '' : 'style="visibility:hidden"'}>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <div class="field"><label>2.2 Estimated monthly expenses</label>
+      <div class="turnover-grid">
+        ${EXPENSE_BRACKETS.map(([code, label]) => `
+          <div class="turnover-opt ${draft.economic.expensesBracket === code ? 'on' : ''}">
+            <input type="radio" name="expenses" value="${code}" ${draft.economic.expensesBracket === code ? 'checked' : ''} data-expenses-radio>
+            <div class="to-label">${esc(label)}</div>
+            <input type="number" placeholder="Amount K" data-bind="economic.expensesAmount" ${draft.economic.expensesBracket === code ? '' : 'style="visibility:hidden"'}>
+          </div>
+        `).join('')}
+      </div>
+    </div>
+
+    <div class="field-row">
+      <div class="field"><label>2.3 Initial capital (K)</label><input type="number" data-bind="economic.initialCapital"></div>
+      <div class="field"><label>2.4 Value of assets to date (K)</label><input type="number" data-bind="economic.assetsValue"></div>
+    </div>
+    <div class="field"><label>2.5 Other investments (K)</label><input type="number" data-bind="economic.otherInvestments"></div>
+    <div class="field"><label>Specify</label><input type="text" data-bind="economic.otherInvestmentsSpecify"></div>
+  `;
+  bindInputs(el);
+  $all('[data-turnover-radio]', el).forEach(r => r.addEventListener('change', () => { draft.economic.turnoverBracket = r.value; renderStepE(el); }));
+  $all('[data-expenses-radio]', el).forEach(r => r.addEventListener('change', () => { draft.economic.expensesBracket = r.value; renderStepE(el); }));
+}
+
+/* ---- Step F: Cash Crops ---- */
+function renderStepF(el) {
+  el.innerHTML = `
+    <div class="field"><label>Indicate cash crops held by the household</label></div>
+    <div class="card" style="background:var(--surface-2); border:1px solid var(--border);">
+      <div class="crop-row" style="font-weight:700; font-size:12px; color:var(--text-muted); text-transform:uppercase;">
+        <div>Crop</div><div>No. of blocks</div><div>No. of trees</div>
+      </div>
+      ${FIXED_CROPS.map(c => `
+        <div class="crop-row">
+          <div class="crop-name">${esc(c)}</div>
+          <input type="number" min="0" data-crop="${esc(c)}" data-f="blocks" value="${esc((draft.cashCrops.fixed[c]||{}).blocks || '')}">
+          <input type="number" min="0" data-crop="${esc(c)}" data-f="trees" value="${esc((draft.cashCrops.fixed[c]||{}).trees || '')}">
+        </div>
+      `).join('')}
+    </div>
+    <div class="field" style="margin-top:12px;"><label>Other crops</label></div>
+    <div id="other-crops-table"></div>
+    <div class="field"><label>Comments</label><textarea data-bind="cashCrops.comments"></textarea></div>
+  `;
+  bindInputs(el);
+  $all('[data-crop]', el).forEach(inp => inp.addEventListener('input', () => {
+    const c = inp.dataset.crop, f = inp.dataset.f;
+    if (!draft.cashCrops.fixed[c]) draft.cashCrops.fixed[c] = {};
+    draft.cashCrops.fixed[c][f] = inp.value;
+  }));
+  renderRepeatTable($('#other-crops-table'), draft.cashCrops.others, ['name', 'blocks', 'trees'], ['Crop name', 'No. of blocks', 'No. of trees'], () => renderStepF(el));
+}
+
+/* ---- Step G8: business loan for informal ---- */
+function renderStepG8(el) {
+  el.innerHTML = `
+    ${ynToggle('business.loanAccess', '8. Are you able to access a business loan?')}
+    <div id="loans-table-g8"></div>
+    <div class="field" id="loan-reasons-field-g8" style="display:${draft.business.loanAccess === 'No' ? 'block' : 'none'}">
+      <label>If no, state reasons why</label>
+      <textarea data-bind="business.loanReasons"></textarea>
+    </div>
+  `;
+  bindInputs(el);
+  bindYN(el);
+  renderRepeatTable($('#loans-table-g8'), draft.business.loans, ['institution', 'amount', 'date', 'onSchedule'],
+    ['Bank / financial institution', 'Loan amount (K)', 'Date of loan', 'Repayment on schedule? (Yes/No)'], () => renderStepG8(el));
+  $all('[data-yn="business.loanAccess"] button', el).forEach(b => b.addEventListener('click', () => {
+    $('#loan-reasons-field-g8').style.display = draft.business.loanAccess === 'No' ? 'block' : 'none';
+  }));
+}
+
+/* ---- Step G: Informal sector ---- */
+function renderStepG(el) {
+  el.innerHTML = `
+    <div class="field"><label>Informal business activity(ies) — Table 11</label></div>
+    <div id="informal-table"></div>
+    <div class="field"><label>Comments</label><textarea data-bind="informal.comments"></textarea></div>
+  `;
+  bindInputs(el);
+  renderRepeatTable($('#informal-table'), draft.informal.entries, ['ownerName', 'activityType', 'yearEstablished', 'monthlyTurnover'],
+    ['Name of owner', 'Type of business activity', 'Year established', 'Monthly turnover (K)'], () => renderStepG(el));
+}
+
+/* ---- Review ---- */
+function renderStepReview(el) {
+  const status = draft.businessStatus;
+  let html = `<div class="warn-box">Review the details below, then tap <strong>Save record</strong>. It will be stored on this device and can be exported later from the Transfer tab.</div>`;
+  html += reviewBlockHTML('A. Location', [
+    ['District', draft.location.district], ['Village', draft.location.village], ['Ward', draft.location.ward],
+    ['Household No.', draft.location.householdNo], ['Date collected', fmtDate(draft.location.dateCollected)],
+    ['Contact', draft.location.contactPerson + (draft.location.mobile ? ' · ' + draft.location.mobile : '')]
+  ]);
+  html += reviewBlockHTML('B. Employment', [
+    ['Formally employed', draft.employment.numFormallyEmployed],
+    ['Business status', status === 'formal' ? 'Formal business' : status === 'informal' ? 'Informal sector' : 'No business']
+  ], reviewSubList('Employed members', draft.employment.employedMembers, fmtEmployed) + reviewSubList('Unemployed (qualified) members', draft.employment.unemployedMembers, fmtUnemployed));
+  if (status === 'formal') {
+    html += reviewBlockHTML('C. Business Background', [
+      ['Business name', draft.business.name], ['Owner', draft.business.owner],
+      ['IPA registered', draft.business.ipaRegistered],
+      ['Loan access', draft.business.loanAccess]
+    ], reviewSubList('Registration forms', draft.business.regForms, fmtRegForm) + reviewSubList('Licenses', draft.business.licenses, fmtLicense) + reviewSubList('Loans', draft.business.loans, fmtLoan));
+    html += reviewBlockHTML('D. Development', [
+      ['Training attended', draft.development.trainingAttended],
+      ['Assistance required', draft.development.assistanceRequired.join(', ') || '—']
+    ], reviewSubList('Training history', Object.entries(draft.development.trainingHistory || {}), ([t, f]) => `${t}${f ? ' — Facilitator: ' + f : ''}`));
+    html += reviewBlockHTML('E. Economic Output', [
+      ['Turnover bracket', draft.economic.turnoverBracket || '—'], ['Expenses bracket', draft.economic.expensesBracket || '—'],
+      ['Initial capital (K)', draft.economic.initialCapital || '—']
+    ]);
+  } else if (status === 'informal') {
+    html += reviewBlockHTML('C.8 Loan', [['Loan access', draft.business.loanAccess || '—']], reviewSubList('Loans', draft.business.loans, fmtLoan));
+  }
+  {
+    const cropSummary = FIXED_CROPS.filter(c => draft.cashCrops.fixed[c] && (draft.cashCrops.fixed[c].blocks || draft.cashCrops.fixed[c].trees))
+      .map(c => `${c}: ${draft.cashCrops.fixed[c].blocks || 0} blocks / ${draft.cashCrops.fixed[c].trees || 0} trees`);
+    html += reviewBlockHTML('F. Cash Crops', [['Comments', draft.cashCrops.comments || '—']],
+      reviewSubList('Fixed crops recorded', cropSummary, x => x) + reviewSubList('Other crops', draft.cashCrops.others, fmtOtherCrop));
+  }
+  if (status === 'informal') {
+    html += reviewBlockHTML('G. Informal Sector', [], reviewSubList('Entries', draft.informal.entries, fmtInformal));
+  }
+  el.innerHTML = html;
+}
+
+async function saveDraftRecord() {
+  const missing = [];
+  if (!draft.location.district) missing.push('District');
+  if (!draft.location.llg) missing.push('LLG');
+  if (!draft.location.village) missing.push('Village');
+  if (!draft.location.householdNo) missing.push('Household No.');
+  if (missing.length) {
+    toast(`Missing required field(s) in Section A: ${missing.join(', ')}`);
+    stepIndex = 0;
+    renderWizard();
+    return;
+  }
+  const dup = await checkDuplicateRemote(draft);
+  if (dup) {
+    const proceed = confirm(`A record for Household No. ${draft.location.householdNo} in ${draft.location.llg} (Ward ${draft.location.ward || '—'}) already exists — collected ${fmtDate(dup.date_collected)}. Save this as a separate entry anyway?`);
+    if (!proceed) return;
+  }
+  draft.updatedAt = new Date().toISOString();
+  try {
+    await upsertRecordRemote(draft);
+  } catch (err) {
+    console.error('Save failed:', err);
+    toast('Could not save — check your connection and try again');
+    return;
+  }
+  clearDraft();
+  stopAutosaveInterval();
+  toast(editingExisting ? 'Record updated' : 'Record saved');
+  switchView('dashboard');
+}
 
 /* -------------------------------- transfer -------------------------------- */
 async function renderTransfer() {
