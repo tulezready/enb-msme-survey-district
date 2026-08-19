@@ -79,7 +79,7 @@ function wardOptionsHTML(llg, currentWard) {
 // Supabase project: tulezready's enb-msme-survey
 const SUPABASE_URL = 'https://lgfdzxcawggxrqvsgzpz.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_cX_rXW51KpL-k9arZupk9w_6MS9Jlo_';
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storageKey: 'sb-enb-district-auth' } });
 
 const BUSINESS_ACTIVITIES = {
   general: { label: 'Commerce & Services', items: ['Trade store','Wholesale','Fast food outlet','Second hand clothing shop','Liquor / Bottle shop','Bakery','Service station','PMV / Transport / Taxi services','Pest Control','Professional services (accountancy/consultancy)','Tailoring','Coffin Making','Mechanical Workshop','Contracting services','Communication Towers'] },
