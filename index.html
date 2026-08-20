@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>ENBPA District Administration — Economic & MSME Survey</title>
+<title>ENBPA District Office — Economic & MSME Survey</title>
 <meta name="theme-color" content="#0E1613">
 <link rel="manifest" href="manifest.json">
 <link rel="icon" href="icon-192.png" type="image/png">
@@ -132,6 +132,14 @@ input,select,textarea{font-family:inherit; font-size:15px;}
 .stat-card.clickable, .review-line.clickable, .card.clickable{transition:background .15s, transform .1s; cursor:pointer;}
 .card.clickable:hover{background:var(--surface-2);}
 .stat-card.clickable:hover{background:var(--surface-2); transform:translateY(-1px);}
+.value-table{width:100%; border-collapse:collapse; font-size:12.5px; margin-top:4px;}
+.value-table th{text-align:left; padding:8px 6px; font-size:10.5px; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); border-bottom:2px solid var(--border); white-space:nowrap;}
+.value-table td{padding:9px 6px; border-bottom:1px solid var(--border); white-space:nowrap;}
+.value-table tr:last-child td{border-bottom:none;}
+.value-table td.num, .value-table th.num{text-align:right; font-family:var(--font-mono);}
+.value-table .crop-name{font-weight:700; color:var(--primary-dark); white-space:normal;}
+.value-table-wrap{overflow-x:auto; -webkit-overflow-scrolling:touch;}
+.gap-positive{color:var(--danger); font-weight:700;}
 .stat-card.clickable:active{transform:translateY(0);}
 .review-line.clickable:hover{background:var(--surface-2);}
 
@@ -547,7 +555,7 @@ body.locked .topbar, body.locked .bottomnav{ display:none; }
   <div class="brand">
     <div class="seal"><img src="logo.svg" alt="ENBPA Division of Commerce & Industry logo"></div>
     <div class="brand-text">
-      <div class="t1" id="brand-district-label">ENBPA &middot; District Administration</div>
+      <div class="t1" id="brand-district-label">ENBPA &middot; District Office</div>
       <div class="t2">Economic &amp; MSME Survey</div>
     </div>
   </div>

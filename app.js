@@ -966,26 +966,6 @@ function priceComparisonCardHTML(priceComparison, marketPrices, cashCrops) {
     const p = byCommodity[c] || {};
     const hasBoth = p.local_price_pgk_kg != null && p.intl_price_pgk_kg != null;
     const ratioColor = !hasBoth ? 'var(--text-muted)' : (p.ratio_pct >= 90 ? 'var(--primary)' : p.ratio_pct >= 60 ? 'var(--accent-dark)' : 'var(--danger)');
-
-    // Connects this commodity's price back to actual tree counts reported
-    // in Section F for whatever scope is currently selected.
-    const cropKey = Object.keys(CROP_TO_PRICE_COMMODITY).find(k => CROP_TO_PRICE_COMMODITY[k] === c);
-    const treeCount = cropKey && cashCrops && cashCrops[cropKey] ? Number(cashCrops[cropKey].trees) || 0 : 0;
-    const yieldPerTree = cropKey ? CROP_YIELD_PER_TREE_KG[cropKey] : null;
-    let estimateHTML = '';
-    if (treeCount > 0 && yieldPerTree) {
-      const estKg = treeCount * yieldPerTree;
-      const estKgRounded = Math.round(estKg);
-      const localPrice = p.local_price_pgk_kg;
-      const estValue = localPrice != null ? Math.round(estKg * localPrice) : null;
-      estimateHTML = `<div style="background:var(--surface-2); border-radius:8px; padding:10px 12px; margin-top:10px;">
-        <div style="font-size:11px; font-weight:700; text-transform:uppercase; letter-spacing:.03em; color:var(--text-muted); margin-bottom:4px;">Estimated Production (from reported trees)</div>
-        <div style="font-size:13px;">${treeCount.toLocaleString()} tree(s) reported \u00d7 ${yieldPerTree} kg/tree \u2248 <strong>${estKgRounded.toLocaleString()} kg</strong> ${esc(cropKey === 'Coffee' ? 'dry parchment' : cropKey === 'Coconut' ? 'copra' : 'dry beans')}/year</div>
-        ${estValue != null ? `<div style="font-size:13px; margin-top:2px;">At local price: \u2248 <strong>K${estValue.toLocaleString()}</strong>/year</div>` : `<div style="font-size:11px; color:var(--text-muted); margin-top:2px;">Log a local price above to estimate value</div>`}
-        <div style="font-size:10px; color:var(--text-muted); margin-top:5px; font-style:italic;">Based on a provincial smallholder average yield, not measured ENB data — a rough estimate, not a precise figure.</div>
-      </div>`;
-    }
-
     return `<div class="review-block" style="margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border);">
       <h5 style="margin:0 0 8px; font-size:13.5px; font-weight:700; color:var(--primary-dark);">${esc(c)}</h5>
       <div class="stat-grid" style="grid-template-columns:repeat(3,1fr); gap:8px;">
@@ -994,14 +974,58 @@ function priceComparisonCardHTML(priceComparison, marketPrices, cashCrops) {
         <div class="stat-card" style="padding:10px; border-color:${ratioColor};"><div class="num" style="font-size:18px; color:${ratioColor};">${p.ratio_pct != null ? p.ratio_pct + '%' : '—'}</div><div class="lbl" style="font-size:10.5px;">Local as % of intl.</div></div>
       </div>
       ${p.intl_price_usd_tonne != null ? `<p style="font-size:11px; color:var(--text-muted); margin:8px 0 0;">International: $${p.intl_price_usd_tonne}/tonne${p.exchange_rate ? ` · converted at $1 = K${p.exchange_rate}${p.exchange_rate_date ? ' (' + fmtDate(p.exchange_rate_date) + ')' : ''}` : ' · no exchange rate on file yet'}</p>` : ''}
-      ${estimateHTML}
     </div>`;
   }).join('');
+
+  // The table: for each crop, what the reported trees are actually worth at
+  // local price versus at international price, for this exact scope
+  // (LLG or ward - whatever Summary is currently showing within this
+  // account's own district). Gap is what the difference represents in real
+  // Kina, not just a per-kg ratio.
+  const tableRows = commodities.map(c => {
+    const p = byCommodity[c] || {};
+    const cropKey = Object.keys(CROP_TO_PRICE_COMMODITY).find(k => CROP_TO_PRICE_COMMODITY[k] === c);
+    const treeCount = cropKey && cashCrops && cashCrops[cropKey] ? Number(cashCrops[cropKey].trees) || 0 : 0;
+    const yieldPerTree = cropKey ? CROP_YIELD_PER_TREE_KG[cropKey] : null;
+    if (treeCount === 0 || !yieldPerTree) {
+      return `<tr><td class="crop-name">${esc(c)}</td><td class="num" colspan="4" style="color:var(--text-muted); font-style:italic;">No trees reported for this scope</td></tr>`;
+    }
+    const estKg = treeCount * yieldPerTree;
+    const localPrice = p.local_price_pgk_kg;
+    const intlPrice = p.intl_price_pgk_kg;
+    const localValue = localPrice != null ? estKg * localPrice : null;
+    const intlValue = intlPrice != null ? estKg * intlPrice : null;
+    const gap = (localValue != null && intlValue != null) ? intlValue - localValue : null;
+    return `<tr>
+      <td class="crop-name">${esc(c)}</td>
+      <td class="num">${Math.round(estKg).toLocaleString()} kg</td>
+      <td class="num">${localValue != null ? 'K' + Math.round(localValue).toLocaleString() : '—'}</td>
+      <td class="num">${intlValue != null ? 'K' + Math.round(intlValue).toLocaleString() : '—'}</td>
+      <td class="num ${gap != null && gap > 0 ? 'gap-positive' : ''}">${gap != null ? (gap > 0 ? '+' : '') + 'K' + Math.round(gap).toLocaleString() : '—'}</td>
+    </tr>`;
+  }).join('');
+
+  const anyTreesReported = commodities.some(c => {
+    const cropKey = Object.keys(CROP_TO_PRICE_COMMODITY).find(k => CROP_TO_PRICE_COMMODITY[k] === c);
+    return cropKey && cashCrops && cashCrops[cropKey] && Number(cashCrops[cropKey].trees) > 0;
+  });
+
+  const valueTableHTML = anyTreesReported ? `<div style="margin-top:16px;">
+    <h5 style="margin:0 0 4px; font-size:13.5px; font-weight:700; color:var(--primary-dark);">Estimated Value — Local vs. International</h5>
+    <p style="font-size:11px; color:var(--text-muted); margin:0 0 8px;">Based on reported trees for this scope × a provincial smallholder average yield — a rough estimate, not measured ENB data. "Gap" is what the same production would be worth at international price instead of local.</p>
+    <div class="value-table-wrap">
+      <table class="value-table">
+        <thead><tr><th>Crop</th><th class="num">Est. Production</th><th class="num">Local Value</th><th class="num">Intl. Value</th><th class="num">Gap</th></tr></thead>
+        <tbody>${tableRows}</tbody>
+      </table>
+    </div>
+  </div>` : '';
 
   return `<div class="review-block card">
     <h4>Local vs. International Prices</h4>
     <p style="font-size:12px; color:var(--text-muted); margin-bottom:14px;">International prices are entered manually by PHQ, converted to PGK per kg using the most recent exchange rate on file.</p>
     ${rows}
+    ${valueTableHTML}
   </div>`;
 }
 
