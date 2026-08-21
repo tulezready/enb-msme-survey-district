@@ -934,10 +934,11 @@ function marketPricesCardHTML(marketPrices) {
           <option value="Cocoa">Cocoa</option>
           <option value="Coconut/Copra">Coconut/Copra</option>
           <option value="Coffee">Coffee</option>
+          <option value="Balsa">Balsa</option>
         </select>
       </div>
       <div class="field-row">
-        <div class="field"><label>Price per kg (K)</label><input type="number" id="price-value-input" step="0.01" min="0.01" placeholder="e.g. 8.75"></div>
+        <div class="field"><label id="price-value-label">Price per kg (K)</label><input type="number" id="price-value-input" step="0.01" min="0.01" placeholder="e.g. 8.75"></div>
         <div class="field"><label>Date</label><input type="date" id="price-date-input" value="${todayStr()}"></div>
       </div>
       <div class="field"><label>Market / Location</label><input type="text" id="price-location-input" placeholder="e.g. Kokopo Market"></div>
@@ -956,34 +957,57 @@ function marketPricesCardHTML(marketPrices) {
 // relative potential between LLGs, not a precise per-farm prediction.
 const CROP_YIELD_PER_TREE_KG = { 'Cocoa': 0.38, 'Coconut': 7.7, 'Coffee': 0.43 };
 const CROP_TO_PRICE_COMMODITY = { 'Cocoa': 'Cocoa', 'Coconut': 'Coconut/Copra', 'Coffee': 'Coffee' };
+// Balsa is a one-time harvest volume (m3), not a repeating annual weight
+// yield. 0.4 m3/tree derived from real ENB plantation data (ACIAR Technical
+// Report 73 / Jenkin et al. 2019): ~200 m3/ha conservative yield at a
+// typical 5-year harvest, divided by ~450-550 trees/ha remaining after
+// standard thinning by that age. Assumes a mature, harvest-ready tree.
+const BALSA_YIELD_M3_PER_TREE = 0.4;
 
 function priceComparisonCardHTML(priceComparison, marketPrices, cashCrops) {
   const byCommodity = {};
   (priceComparison || []).forEach(p => { byCommodity[p.commodity] = p; });
-  const commodities = ['Cocoa', 'Coconut/Copra', 'Coffee'];
+  const commodities = ['Cocoa', 'Coconut/Copra', 'Coffee', 'Balsa'];
+  const unitLabel = u => u === 'm3' ? 'm\u00b3' : 'kg';
 
   const rows = commodities.map(c => {
     const p = byCommodity[c] || {};
-    const hasBoth = p.local_price_pgk_kg != null && p.intl_price_pgk_kg != null;
+    const u = p.unit || (c === 'Balsa' ? 'm3' : 'kg');
+    const hasBoth = p.local_price_pgk_unit != null && p.intl_price_pgk_unit != null;
     const ratioColor = !hasBoth ? 'var(--text-muted)' : (p.ratio_pct >= 90 ? 'var(--primary)' : p.ratio_pct >= 60 ? 'var(--accent-dark)' : 'var(--danger)');
     return `<div class="review-block" style="margin-bottom:14px; padding-bottom:12px; border-bottom:1px solid var(--border);">
       <h5 style="margin:0 0 8px; font-size:13.5px; font-weight:700; color:var(--primary-dark);">${esc(c)}</h5>
       <div class="stat-grid" style="grid-template-columns:repeat(3,1fr); gap:8px;">
-        <div class="stat-card" style="padding:10px;"><div class="num" style="font-size:18px;">${p.local_price_pgk_kg != null ? 'K' + p.local_price_pgk_kg : '—'}</div><div class="lbl" style="font-size:10.5px;">Local /kg</div></div>
-        <div class="stat-card" style="padding:10px;"><div class="num" style="font-size:18px;">${p.intl_price_pgk_kg != null ? 'K' + p.intl_price_pgk_kg : '—'}</div><div class="lbl" style="font-size:10.5px;">International /kg (converted)</div></div>
+        <div class="stat-card" style="padding:10px;"><div class="num" style="font-size:18px;">${p.local_price_pgk_unit != null ? 'K' + p.local_price_pgk_unit : '—'}</div><div class="lbl" style="font-size:10.5px;">Local /${unitLabel(u)}</div></div>
+        <div class="stat-card" style="padding:10px;"><div class="num" style="font-size:18px;">${p.intl_price_pgk_unit != null ? 'K' + p.intl_price_pgk_unit : '—'}</div><div class="lbl" style="font-size:10.5px;">International /${unitLabel(u)} (converted)</div></div>
         <div class="stat-card" style="padding:10px; border-color:${ratioColor};"><div class="num" style="font-size:18px; color:${ratioColor};">${p.ratio_pct != null ? p.ratio_pct + '%' : '—'}</div><div class="lbl" style="font-size:10.5px;">Local as % of intl.</div></div>
       </div>
-      ${p.intl_price_usd_tonne != null ? `<p style="font-size:11px; color:var(--text-muted); margin:8px 0 0;">International: $${p.intl_price_usd_tonne}/tonne${p.exchange_rate ? ` · converted at $1 = K${p.exchange_rate}${p.exchange_rate_date ? ' (' + fmtDate(p.exchange_rate_date) + ')' : ''}` : ' · no exchange rate on file yet'}</p>` : ''}
+      ${p.intl_price_usd_unit != null ? `<p style="font-size:11px; color:var(--text-muted); margin:8px 0 0;">International: $${p.intl_price_usd_unit}/${u === 'm3' ? 'm\u00b3' : 'tonne'}${p.exchange_rate ? ` · converted at $1 = K${p.exchange_rate}${p.exchange_rate_date ? ' (' + fmtDate(p.exchange_rate_date) + ')' : ''}` : ' · no exchange rate on file yet'}</p>` : ''}
     </div>`;
   }).join('');
 
-  // The table: for each crop, what the reported trees are actually worth at
-  // local price versus at international price, for this exact scope
-  // (LLG or ward - whatever Summary is currently showing within this
-  // account's own district). Gap is what the difference represents in real
-  // Kina, not just a per-kg ratio.
+  // Cocoa/Coconut/Coffee are real annual figures. Balsa is a one-time
+  // harvest value, not a yearly one - its row says "if harvested" right
+  // where it's read, not just in the caption above the table.
   const tableRows = commodities.map(c => {
     const p = byCommodity[c] || {};
+    if (c === 'Balsa') {
+      const treeCount = cashCrops && cashCrops['Balsa'] ? Number(cashCrops['Balsa'].trees) || 0 : 0;
+      if (treeCount === 0) {
+        return `<tr><td class="crop-name">Balsa</td><td class="num" colspan="4" style="color:var(--text-muted); font-style:italic;">No trees reported for this scope</td></tr>`;
+      }
+      const estM3 = treeCount * BALSA_YIELD_M3_PER_TREE;
+      const localValue = p.local_price_pgk_unit != null ? estM3 * p.local_price_pgk_unit : null;
+      const intlValue = p.intl_price_pgk_unit != null ? estM3 * p.intl_price_pgk_unit : null;
+      const gap = (localValue != null && intlValue != null) ? intlValue - localValue : null;
+      return `<tr>
+        <td class="crop-name">Balsa <span style="font-weight:400; color:var(--text-muted); font-size:11px;">(if harvested now)</span></td>
+        <td class="num">${estM3.toFixed(1)} m\u00b3</td>
+        <td class="num">${localValue != null ? 'K' + Math.round(localValue).toLocaleString() : '—'}</td>
+        <td class="num">${intlValue != null ? 'K' + Math.round(intlValue).toLocaleString() : '—'}</td>
+        <td class="num ${gap != null && gap > 0 ? 'gap-positive' : ''}">${gap != null ? (gap > 0 ? '+' : '') + 'K' + Math.round(gap).toLocaleString() : '—'}</td>
+      </tr>`;
+    }
     const cropKey = Object.keys(CROP_TO_PRICE_COMMODITY).find(k => CROP_TO_PRICE_COMMODITY[k] === c);
     const treeCount = cropKey && cashCrops && cashCrops[cropKey] ? Number(cashCrops[cropKey].trees) || 0 : 0;
     const yieldPerTree = cropKey ? CROP_YIELD_PER_TREE_KG[cropKey] : null;
@@ -991,10 +1015,8 @@ function priceComparisonCardHTML(priceComparison, marketPrices, cashCrops) {
       return `<tr><td class="crop-name">${esc(c)}</td><td class="num" colspan="4" style="color:var(--text-muted); font-style:italic;">No trees reported for this scope</td></tr>`;
     }
     const estKg = treeCount * yieldPerTree;
-    const localPrice = p.local_price_pgk_kg;
-    const intlPrice = p.intl_price_pgk_kg;
-    const localValue = localPrice != null ? estKg * localPrice : null;
-    const intlValue = intlPrice != null ? estKg * intlPrice : null;
+    const localValue = p.local_price_pgk_unit != null ? estKg * p.local_price_pgk_unit : null;
+    const intlValue = p.intl_price_pgk_unit != null ? estKg * p.intl_price_pgk_unit : null;
     const gap = (localValue != null && intlValue != null) ? intlValue - localValue : null;
     return `<tr>
       <td class="crop-name">${esc(c)}</td>
@@ -1006,13 +1028,14 @@ function priceComparisonCardHTML(priceComparison, marketPrices, cashCrops) {
   }).join('');
 
   const anyTreesReported = commodities.some(c => {
+    if (c === 'Balsa') return cashCrops && cashCrops['Balsa'] && Number(cashCrops['Balsa'].trees) > 0;
     const cropKey = Object.keys(CROP_TO_PRICE_COMMODITY).find(k => CROP_TO_PRICE_COMMODITY[k] === c);
     return cropKey && cashCrops && cashCrops[cropKey] && Number(cashCrops[cropKey].trees) > 0;
   });
 
   const valueTableHTML = anyTreesReported ? `<div style="margin-top:16px;">
     <h5 style="margin:0 0 4px; font-size:13.5px; font-weight:700; color:var(--primary-dark);">Estimated Value — Local vs. International</h5>
-    <p style="font-size:11px; color:var(--text-muted); margin:0 0 8px;">Based on reported trees for this scope × a provincial smallholder average yield — a rough estimate, not measured ENB data. "Gap" is what the same production would be worth at international price instead of local.</p>
+    <p style="font-size:11px; color:var(--text-muted); margin:0 0 8px;">Based on reported trees for this scope × a provincial smallholder average yield — a rough estimate, not measured ENB data. Cocoa/Coconut/Coffee figures are annual; Balsa is a one-time harvest value. "Gap" is what the same production would be worth at international price instead of local.</p>
     <div class="value-table-wrap">
       <table class="value-table">
         <thead><tr><th>Crop</th><th class="num">Est. Production</th><th class="num">Local Value</th><th class="num">Intl. Value</th><th class="num">Gap</th></tr></thead>
@@ -1344,16 +1367,24 @@ async function renderRecordsSummary() {
       toggleBtn.textContent = formEl.hidden ? '+ Log a Price Observation' : 'Cancel';
     });
   }
+  const priceCommoditySelect = $('#price-commodity-select');
+  const priceValueLabel = $('#price-value-label');
+  if (priceCommoditySelect && priceValueLabel) {
+    priceCommoditySelect.addEventListener('change', () => {
+      priceValueLabel.textContent = priceCommoditySelect.value === 'Balsa' ? 'Price per m\u00b3 (K)' : 'Price per kg (K)';
+    });
+  }
   const savePriceBtn = $('#btn-save-price-observation');
   if (savePriceBtn) savePriceBtn.addEventListener('click', async () => {
     const commodity = $('#price-commodity-select').value;
+    const unit = commodity === 'Balsa' ? 'm3' : 'kg';
     const price = parseFloat($('#price-value-input').value);
     const date = $('#price-date-input').value;
     const location = $('#price-location-input').value.trim();
     const notes = $('#price-notes-input').value.trim();
     const errEl = $('#price-form-error');
     errEl.textContent = '';
-    if (!price || price <= 0) { errEl.textContent = 'Enter a valid price per kg.'; return; }
+    if (!price || price <= 0) { errEl.textContent = `Enter a valid price per ${unit === 'm3' ? 'cubic meter' : 'kg'}.`; return; }
     if (!location) { errEl.textContent = 'Enter the market or location.'; return; }
     if (!date) { errEl.textContent = 'Select a date.'; return; }
     savePriceBtn.disabled = true;
@@ -1361,7 +1392,7 @@ async function renderRecordsSummary() {
     try {
       const { data: { user } } = await sb.auth.getUser();
       const { error } = await sb.from('market_prices').insert({
-        commodity, price_per_kg: price, recorded_date: date, market_location: location,
+        commodity, price_per_unit: price, unit, recorded_date: date, market_location: location,
         notes: notes || null, recorded_by: user ? user.id : null
       });
       if (error) throw error;
