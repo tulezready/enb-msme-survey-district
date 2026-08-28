@@ -61,8 +61,8 @@ const WARDS_BY_LLG = {
   'Sinivit Rural': ['Rieit','Arabam','Maranagi','Lemengi','Sanbum','Marambu','Lat','Gar','Marai','Ili','Karong','Sunam','Marunga','Kavudemki','Tol','Sikut','Laup','Ivon/Gore'],
   'West Pomio Rural': ['Gugulena','Malmal','Maginuna','Totongpal','Kaiton','Puapal','Rowan/Malo','Pomai/Mu','Poro/Salel','Irena','Mauna','Lau','Bairaman','Tolel','Palmalmal'],
   'Mamusi Rural': ['Maitao','Serenguna','Paliavulu','Viosopuna','Pokapuna','Bili','Pakia','Okempuna','Kaitoto','Mapuna','Peling','Aona','Yauyau','Kaitou','Kinsena','Ulutu','Kerongkorona','Sivaona','Pepeng','Kangelona'],
-  'Central Pomio Rural': ['Parole','Malakur','Kerkernena','Baien (West)','Galue','Marmar','Pomio','Olaipun','Sali','Bovalpun','Kalakuru','Kawa/Pora','Tokai','Matong','Buka','Pulpul','Kavale'],
-  'Inland Pomio Rural': ['Pakia','Mile','Mukulu','Malvoni','Muele','Bago','Pakaraman','Birigi','Bagitave','Kapkena','Tuki','Lakiri','Marmu','Masuari','Manigugule','Gelioi','Ngavale'],
+  'Central Pomio Rural': ['Parole','Malakur','Kerkernena','Baien (West)','Galue','Marmar','Pomio','Olaipun','Sali','Bovalpun','Kalakuru','Kawa/Pora','Tokai','Matong','Buka','Pulpul','Ngavale'],
+  'Inland Pomio Rural': ['Pakia','Mile','Mukulu','Malvoni','Muele','Bago','Pakaraman','Birigi','Bagitave','Kapkena','Tuki','Lakiri','Marevu','Masuari','Manigugule','Gelioi','Kula/Kavale'],
   'East Pomio Rural': ['Lamarain','Long','Hoya','Kaukum','Milim','Guma','Klampun','Sampun','Wawas','Bain','Raolman','Ivai','Setwei']
 };
 
