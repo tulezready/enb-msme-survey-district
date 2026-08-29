@@ -2223,7 +2223,7 @@ $('#btn-export-json').addEventListener('click', async () => {
   try {
     const all = await fetchAllRecords();
     if (all.length === 0) { toast('No records to export yet'); return; }
-    const payload = { exportedAt: new Date().toISOString(), source: `ENBPA ${myDistrict} District Office — Economic & MSME Survey`, recordCount: all.length, records: all };
+    const payload = { exportedAt: new Date().toISOString(), source: `ENBPA ${myDistrict} District Office — Economic & MSME Survey`, officialContact: 'Data requests: Division of Commerce & Industry, ENBPA', recordCount: all.length, records: all };
     downloadFile(`enb-msme-export-${todayStr()}.json`, JSON.stringify(payload, null, 2), 'application/json');
     toast('JSON exported');
   } catch (e) {
@@ -2305,7 +2305,12 @@ function recordsToCSV(records) {
     const s = (v === undefined || v === null) ? '' : String(v);
     return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s;
   };
-  return [cols.join(','), ...rows.map(row => row.map(escCsv).join(','))].join('\n');
+  const attribution = [
+    [`ENBPA ${myDistrict} District Office — Economic & MSME Survey`],
+    [`Exported ${todayStr()} — official data requests: Division of Commerce & Industry, ENBPA`],
+    []
+  ];
+  return [...attribution.map(r => r.map(escCsv).join(',')), cols.join(','), ...rows.map(row => row.map(escCsv).join(','))].join('\n');
 }
 
 function downloadFile(filename, content, mime) {
