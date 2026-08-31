@@ -122,10 +122,28 @@ function stepsForStatus(status) {
    kept in sync on every write so existing synchronous reads keep working. */
 function loadRecords() { return recordsCache; }
 
+// Supabase silently caps any unpaginated query at 1000 rows - a plain
+// .select() would quietly return only the first 1000 and look complete.
+// This loops in pages until a less-than-full page confirms the real end.
+async function fetchAllPaginated(queryBuilder) {
+  const PAGE_SIZE = 1000;
+  let allRows = [];
+  let offset = 0;
+  while (true) {
+    const { data, error } = await queryBuilder().range(offset, offset + PAGE_SIZE - 1);
+    if (error) throw error;
+    allRows = allRows.concat(data || []);
+    if (!data || data.length < PAGE_SIZE) break;
+    offset += PAGE_SIZE;
+  }
+  return allRows;
+}
+
 async function fetchAllRecords() {
-  const { data, error } = await sb.from('msme_records').select('data').is('deleted_at', null).order('updated_at', { ascending: false });
-  if (error) throw error;
-  return (data || []).map(row => row.data);
+  const rows = await fetchAllPaginated(() =>
+    sb.from('msme_records').select('data').is('deleted_at', null).order('updated_at', { ascending: false })
+  );
+  return rows.map(row => row.data);
 }
 
 // Single-record save - updates just this one row remotely (RLS enforces it
