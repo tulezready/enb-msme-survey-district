@@ -2113,10 +2113,19 @@ async function renderDataQuality() {
   const container = $('#dataquality-content');
   container.innerHTML = skeletonRows(4);
   let r;
+  let missingHousehold = [];
   try {
-    const { data, error } = await sb.rpc('get_data_quality_report');
-    if (error) throw error;
-    r = data;
+    const [reportResult, hhResult] = await Promise.allSettled([
+      sb.rpc('get_data_quality_report'),
+      sb.rpc('get_missing_household_numbers'),
+    ]);
+    if (reportResult.status !== 'fulfilled' || reportResult.value.error) throw (reportResult.status === 'fulfilled' ? reportResult.value.error : reportResult.reason);
+    r = reportResult.value.data;
+    if (hhResult.status === 'fulfilled' && !hhResult.value.error) {
+      missingHousehold = hhResult.value.data || [];
+    } else {
+      console.error('Failed to load missing household numbers (non-fatal, rest of Data Quality still shows):', hhResult.status === 'fulfilled' ? hhResult.value.error : hhResult.reason);
+    }
   } catch (e) {
     console.error('Failed to load data quality report:', e);
     container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Could not load — check your connection.</p>
@@ -2193,6 +2202,22 @@ async function renderDataQuality() {
     severity: (r.missing_village || 0) > 0 ? 'warn' : 'ok',
     body: '',
     wholeCardFlag: (r.missing_village || 0) > 0 ? 'missing_village' : null
+  });
+
+  // Only wards with 80%+ of their own range already collected are shown -
+  // a ward barely started isn't "missing" hundreds of numbers, it just
+  // hasn't been reached yet. This surfaces genuine gaps worth following up
+  // on, not ordinary survey-in-progress coverage.
+  sections.push({
+    title: 'Missing Household Numbers (in mostly-complete wards)',
+    count: missingHousehold.reduce((sum, w) => sum + w.missing_numbers.length, 0),
+    severity: missingHousehold.length > 0 ? 'warn' : 'ok',
+    body: missingHousehold.length === 0 ? '' : `<p style="font-size:12.5px; color:var(--text-muted); margin-bottom:8px;">These wards have collected 80%+ of their household range but have specific gaps in the sequence — worth checking whether that household was missed or simply hasn't been reached.</p>` +
+      missingHousehold.map(w => {
+        const shown = w.missing_numbers.slice(0, 15);
+        const extra = w.missing_numbers.length - shown.length;
+        return `<div class="review-line" style="align-items:flex-start;"><span class="k">${esc(w.llg)} \u2014 ${esc(w.ward)} <span style="color:var(--text-muted); font-weight:400;">(${w.record_count}/${w.max_household} collected)</span></span><span class="v" style="text-align:right; max-width:55%;">${shown.join(', ')}${extra > 0 ? ` +${extra} more` : ''}</span></div>`;
+      }).join('')
   });
 
   const totalIssues = sections.reduce((sum, s) => sum + s.count, 0);
@@ -2461,6 +2486,18 @@ if (APP_ROLE === 'enumerator') {
 if ('serviceWorker' in navigator && (location.protocol === 'https:' || location.hostname === 'localhost')) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch((err) => console.error('Service worker registration failed:', err));
+  });
+
+  // skipWaiting()/clients.claim() in sw.js make a NEW service worker take
+  // over promptly - but the page already open keeps running its OLD
+  // JavaScript in memory regardless, until something actually reloads it.
+  // Without this, someone could sit on a stale, already-fixed bug
+  // indefinitely. reloaded guards against a reload loop.
+  let reloaded = false;
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (reloaded) return;
+    reloaded = true;
+    window.location.reload();
   });
 }
 
