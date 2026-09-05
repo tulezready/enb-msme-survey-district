@@ -2216,7 +2216,8 @@ async function renderDataQuality() {
       missingHousehold.map(w => {
         const shown = w.missing_numbers.slice(0, 15);
         const extra = w.missing_numbers.length - shown.length;
-        return `<div class="review-line" style="align-items:flex-start;"><span class="k">${esc(w.llg)} \u2014 ${esc(w.ward)} <span style="color:var(--text-muted); font-weight:400;">(${w.record_count}/${w.max_household} collected)</span></span><span class="v" style="text-align:right; max-width:55%;">${shown.join(', ')}${extra > 0 ? ` +${extra} more` : ''}</span></div>`;
+        const fullList = w.missing_numbers.join(', ');
+        return `<div class="review-line" style="align-items:flex-start;"><span class="k">${esc(w.llg)} \u2014 ${esc(w.ward)} <span style="color:var(--text-muted); font-weight:400;">(${w.record_count}/${w.max_household} collected)</span></span><span class="v hh-missing-list" style="text-align:right; max-width:55%;" data-shown="${esc(shown.join(', '))}" data-full="${esc(fullList)}">${shown.join(', ')}${extra > 0 ? ` <span class="clickable" style="color:var(--primary-dark); text-decoration:underline; font-weight:700;" data-expand-hh="1">+${extra} more</span>` : ''}</span></div>`;
       }).join('')
   });
 
@@ -2245,6 +2246,12 @@ async function renderDataQuality() {
     el.addEventListener('click', (e) => {
       e.stopPropagation(); // a sub-row's own click must not also fire its parent card's whole-card handler
       goToFlaggedRecords(el.dataset.flag, el.dataset.llg, el.dataset.ward, el.dataset.title);
+    });
+  });
+  $all('#dataquality-content [data-expand-hh]').forEach(el => {
+    el.addEventListener('click', () => {
+      const parent = el.closest('.hh-missing-list');
+      if (parent) parent.textContent = parent.dataset.full;
     });
   });
 }
