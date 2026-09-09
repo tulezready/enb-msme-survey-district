@@ -2127,6 +2127,19 @@ async function renderDataQuality() {
   return renderDQLLGs();
 }
 
+// Small, labeled badges for whichever categories are non-zero.
+function dqBadges(r) {
+  const items = [
+    ['missing_status', 'Status'], ['missing_household', 'HH#'], ['negative_crops', 'Neg. Crop'],
+    ['turnover_mismatch', 'Turnover'], ['expenses_mismatch', 'Expenses'], ['missing_date', 'Date'], ['missing_village', 'Village'],
+  ];
+  const active = items.filter(([key]) => (r[key] || 0) > 0);
+  if (active.length === 0) return '';
+  return `<div style="margin-top:3px; display:flex; flex-wrap:wrap; gap:5px;">${active.map(([key, label]) =>
+    `<span style="font-size:10px; font-weight:700; color:var(--accent-dark); background:var(--accent-light); padding:1px 6px; border-radius:8px;">${label}: ${r[key]}</span>`
+  ).join('')}</div>`;
+}
+
 async function renderDQLLGs() {
   const container = $('#dataquality-content');
   container.innerHTML = skeletonRows(4);
@@ -2141,7 +2154,7 @@ async function renderDQLLGs() {
     if (rows.length === 0) {
       html += `<div class="empty-state"><div class="icon">✅</div><p>No data quality issues in this district.</p></div>`;
     } else {
-      html += rows.map(r => `<div class="review-line clickable card" data-llg="${esc(r.llg)}"><span class="k">${esc(r.llg)}</span><span class="v" style="font-family:var(--font-mono); font-weight:700; color:${r.total > 0 ? 'var(--accent-dark)' : 'var(--primary)'};">${r.total}</span></div>`).join('');
+      html += rows.map(r => `<div class="review-line clickable card" data-llg="${esc(r.llg)}" style="align-items:flex-start;"><span class="k">${esc(r.llg)}${dqBadges(r)}</span><span class="v" style="font-family:var(--font-mono); font-weight:700; color:${r.total > 0 ? 'var(--accent-dark)' : 'var(--primary)'};">${r.total}</span></div>`).join('');
     }
     container.innerHTML = html;
     $all('[data-llg]', container).forEach(el => {
@@ -2171,7 +2184,7 @@ async function renderDQWards() {
     } else {
       html += rows.map(r => {
         const isUnofficial = officialWards.length > 0 && !officialWards.includes(r.ward);
-        return `<div class="review-line clickable card" data-ward="${esc(r.ward)}"><span class="k">${esc(r.ward)}${isUnofficial ? ' <span style="color:var(--danger); font-size:11px; font-weight:700;">⚠ not on official list</span>' : ''}</span><span class="v" style="font-family:var(--font-mono); font-weight:700; color:${r.total > 0 ? 'var(--accent-dark)' : 'var(--primary)'};">${r.total}</span></div>`;
+        return `<div class="review-line clickable card" data-ward="${esc(r.ward)}" style="align-items:flex-start;"><span class="k">${esc(r.ward)}${isUnofficial ? ' <span style="color:var(--danger); font-size:11px; font-weight:700;">⚠ not on official list</span>' : ''}${dqBadges(r)}</span><span class="v" style="font-family:var(--font-mono); font-weight:700; color:${r.total > 0 ? 'var(--accent-dark)' : 'var(--primary)'};">${r.total}</span></div>`;
       }).join('');
     }
     container.innerHTML = html;
@@ -2192,9 +2205,21 @@ async function renderDQWardDetail() {
   const container = $('#dataquality-content');
   container.innerHTML = skeletonRows(4);
   try {
-    const { data, error } = await sb.rpc('get_dq_detail_for_ward', { p_district: myDistrict, p_llg: dqDrillLLG, p_ward: dqDrillWard });
-    if (error) throw error;
-    const d = data || {};
+    const [detailResult, evidenceResult] = await Promise.allSettled([
+      sb.rpc('get_dq_detail_for_ward', { p_district: myDistrict, p_llg: dqDrillLLG, p_ward: dqDrillWard }),
+      sb.rpc('get_missing_status_records_with_evidence', { p_llg: dqDrillLLG, p_ward: dqDrillWard }),
+    ]);
+    if (detailResult.status !== 'fulfilled' || detailResult.value.error) throw (detailResult.status === 'fulfilled' ? detailResult.value.error : detailResult.reason);
+    const d = detailResult.value.data || {};
+    let statusRecords = [];
+    if (evidenceResult.status === 'fulfilled' && !evidenceResult.value.error) {
+      statusRecords = evidenceResult.value.data || [];
+    } else {
+      console.error('Failed to load missing-status evidence (non-fatal, count still shows):', evidenceResult.status === 'fulfilled' ? evidenceResult.value.error : evidenceResult.reason);
+    }
+    const suggested = statusRecords.filter(r => r.suggested_status);
+    const unclear = statusRecords.filter(r => !r.suggested_status);
+
     const officialWards = WARDS_BY_LLG[dqDrillLLG] || [];
     const isUnofficial = officialWards.length > 0 && !officialWards.includes(dqDrillWard);
     const bracketLabel = (kind, b) => {
@@ -2217,6 +2242,14 @@ async function renderDQWardDetail() {
     if (d.missing_status > 0) {
       html += `<div class="card" style="border-left:3px solid var(--accent-dark); margin-bottom:12px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><h4 style="margin:0;">Missing Business Status</h4><span style="font-family:var(--font-mono); font-weight:700; color:var(--accent-dark);">${d.missing_status}</span></div>
+        ${suggested.length > 0 ? `
+          <p style="font-size:12px; color:var(--text-muted); margin-bottom:8px;">${suggested.length} of these have cash crop data but nothing from the formal or informal sections — matches exactly what "No business" looks like. Not a guess: this is what the record already shows.</p>
+          <button class="btn btn-primary btn-full" id="btn-apply-suggested-dq" style="margin-bottom:8px;">Apply "No Business" to All ${suggested.length}</button>
+        ` : ''}
+        ${unclear.length > 0 ? `
+          <p style="font-size:12px; color:var(--text-muted); margin:8px 0 6px;">${unclear.length} need individual review \u2014 nothing indicates the right status:</p>
+          ${unclear.map(r => `<div class="review-line clickable" data-id="${esc(r.id)}"><span class="k">HH ${esc(r.household_no || '—')}</span><span class="v">${esc(r.village || '—')}</span></div>`).join('')}
+        ` : ''}
         <span class="clickable remind-link" data-remind-category="missing_status" data-remind-llg="${esc(dqDrillLLG)}" data-remind-ward="${esc(dqDrillWard)}">Send Reminder</span>
       </div>`;
     }
@@ -2272,6 +2305,24 @@ async function renderDQWardDetail() {
           numbers: el.dataset.remindNumbers ? el.dataset.remindNumbers.split(',').map(Number) : null,
         });
       });
+    });
+    const applyBtn = $('#btn-apply-suggested-dq');
+    if (applyBtn) applyBtn.addEventListener('click', async () => {
+      if (!confirm(`Set business status to "None" for all ${suggested.length} of these records? This can be undone afterward by editing any record individually, but not in bulk.`)) return;
+      applyBtn.disabled = true;
+      applyBtn.textContent = 'Applying…';
+      try {
+        const ids = suggested.map(r => r.id);
+        const { data: updatedCount, error: applyError } = await sb.rpc('bulk_set_business_status', { record_ids: ids, new_status: 'none' });
+        if (applyError) throw applyError;
+        toast(`${updatedCount} record(s) updated`);
+        renderDQWardDetail();
+      } catch (e) {
+        console.error('Bulk status update failed:', e);
+        toast('Could not save — check your connection and try again');
+        applyBtn.disabled = false;
+        applyBtn.textContent = `Apply "No Business" to All ${suggested.length}`;
+      }
     });
   } catch (e) {
     console.error('Failed to load Data Quality ward detail:', e);
