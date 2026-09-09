@@ -2110,164 +2110,181 @@ async function renderTransfer() {
   const districtEl = $('#account-district');
   if (districtEl) districtEl.textContent = myDistrict || '—';
 }
+let dqDrillLevel = 'llgs'; // 'llgs' | 'wards' | 'detail' - no district level, since this account's district is fixed
+let dqDrillLLG = null;
+let dqDrillWard = null;
+
+function goToDQ(level, llg, ward) {
+  dqDrillLevel = level;
+  dqDrillLLG = llg || null;
+  dqDrillWard = ward || null;
+  renderDataQuality();
+}
+
 async function renderDataQuality() {
+  if (dqDrillLevel === 'wards') return renderDQWards();
+  if (dqDrillLevel === 'detail') return renderDQWardDetail();
+  return renderDQLLGs();
+}
+
+async function renderDQLLGs() {
   const container = $('#dataquality-content');
   container.innerHTML = skeletonRows(4);
-  let r;
-  let missingHousehold = [];
   try {
-    const [reportResult, hhResult] = await Promise.allSettled([
-      sb.rpc('get_data_quality_report'),
-      sb.rpc('get_missing_household_numbers'),
-    ]);
-    if (reportResult.status !== 'fulfilled' || reportResult.value.error) throw (reportResult.status === 'fulfilled' ? reportResult.value.error : reportResult.reason);
-    r = reportResult.value.data;
-    if (hhResult.status === 'fulfilled' && !hhResult.value.error) {
-      missingHousehold = hhResult.value.data || [];
+    const { data, error } = await sb.rpc('get_dq_summary_by_llg', { p_district: myDistrict });
+    if (error) throw error;
+    const rows = data || [];
+    const total = rows.reduce((sum, r) => sum + r.total, 0);
+    let html = `<div class="warn-box" style="background:${total > 0 ? 'var(--accent-light)' : 'var(--success-light)'}; color:${total > 0 ? '#8A4A05' : 'var(--success)'};">
+      ${total === 0 ? 'No data quality issues currently detected.' : `${total} item(s) in ${esc(myDistrict)} are worth a second look. Tap an LLG to drill down to the specific ward.`}
+    </div>`;
+    if (rows.length === 0) {
+      html += `<div class="empty-state"><div class="icon">✅</div><p>No data quality issues in this district.</p></div>`;
     } else {
-      console.error('Failed to load missing household numbers (non-fatal, rest of Data Quality still shows):', hhResult.status === 'fulfilled' ? hhResult.value.error : hhResult.reason);
+      html += rows.map(r => `<div class="review-line clickable card" data-llg="${esc(r.llg)}"><span class="k">${esc(r.llg)}</span><span class="v" style="font-family:var(--font-mono); font-weight:700; color:${r.total > 0 ? 'var(--accent-dark)' : 'var(--primary)'};">${r.total}</span></div>`).join('');
     }
+    container.innerHTML = html;
+    $all('[data-llg]', container).forEach(el => {
+      el.addEventListener('click', () => goToDQ('wards', el.dataset.llg));
+    });
   } catch (e) {
-    console.error('Failed to load data quality report:', e);
+    console.error('Failed to load Data Quality LLG summary:', e);
     container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Could not load — check your connection.</p>
       <button class="btn btn-outline" id="btn-retry-dq">Retry</button></div>`;
     const retryBtn = $('#btn-retry-dq');
     if (retryBtn) retryBtn.addEventListener('click', renderDataQuality);
-    return;
   }
+}
 
-  // Ward-name mismatches are computed here, client-side, against the same
-  // WARDS_BY_LLG list the wizard and drill-down browser already use as the
-  // single source of truth - never duplicated into SQL.
-  const wardMismatches = (r.distinct_wards_in_use || []).filter(w => {
-    const official = WARDS_BY_LLG[w.llg] || [];
-    return official.length > 0 && !official.includes(w.ward);
-  });
-
-  const sections = [];
-
-  const missing = r.missing_business_status || { total: 0, by_llg: [] };
-  sections.push({
-    title: 'Missing Business Status',
-    count: missing.total,
-    severity: missing.total > 0 ? 'warn' : 'ok',
-    body: missing.total === 0 ? '' : `<p style="font-size:12.5px; color:var(--text-muted); margin-bottom:8px;">These records were saved without ever recording formal, informal, or none — likely an incomplete survey.</p>` +
-      missing.by_llg.map(x => `<div class="review-line-wrap"><div class="review-line clickable" data-flag="missing_business_status" data-llg="${esc(x.llg)}" data-title="Missing Business Status \u2014 ${esc(x.llg)}"><span class="k">${esc(x.llg)}</span><span class="v">${x.count}</span></div><span class="clickable remind-link" data-remind-category="missing_status" data-remind-llg="${esc(x.llg)}">Send Reminder</span></div>`).join('')
-  });
-
-  const neg = r.negative_cash_crop_values || [];
-  sections.push({
-    title: 'Negative Cash Crop Values',
-    count: neg.length,
-    severity: neg.length > 0 ? 'bad' : 'ok',
-    body: neg.map(x => `<div class="review-line clickable" data-id="${esc(x.id)}"><span class="k">${esc(x.llg)} · HH ${esc(x.household_no || '—')} · ${esc(x.crop)}</span><span class="v" style="color:var(--danger);">${esc(x.field)}: ${esc(x.value)}</span></div>`).join('')
-  });
-
-  const tMismatch = r.turnover_bracket_mismatch || [];
-  const eMismatch = r.expenses_bracket_mismatch || [];
-  const bracketLabel = (kind, b) => {
-    const t = { a: '<K60,000', b: 'K60,001–250,000', c: 'K250,001–5,000,000', d: '>K5,000,000' };
-    const e = { '1': '<K5,000', '2': 'K5,001–250,000', '3': 'K250,001–500,000', '4': '>K500,001' };
-    return kind === 'turnover' ? t[b] : e[b];
-  };
-  sections.push({
-    title: 'Turnover Amount Doesn\u2019t Match Selected Bracket',
-    count: tMismatch.length,
-    severity: tMismatch.length > 0 ? 'warn' : 'ok',
-    body: tMismatch.map(x => `<div class="review-line clickable" data-id="${esc(x.id)}"><span class="k">${esc(x.llg)}</span><span class="v">K${Number(x.amount).toLocaleString()} in bracket "${esc(bracketLabel('turnover', x.bracket))}"</span></div>`).join('')
-  });
-  sections.push({
-    title: 'Expenses Amount Doesn\u2019t Match Selected Bracket',
-    count: eMismatch.length,
-    severity: eMismatch.length > 0 ? 'warn' : 'ok',
-    body: eMismatch.map(x => `<div class="review-line clickable" data-id="${esc(x.id)}"><span class="k">${esc(x.llg)}</span><span class="v">K${Number(x.amount).toLocaleString()} in bracket "${esc(bracketLabel('expenses', x.bracket))}"</span></div>`).join('')
-  });
-
-  sections.push({
-    title: 'Ward Name Not in Official List',
-    count: wardMismatches.length,
-    severity: wardMismatches.length > 0 ? 'warn' : 'ok',
-    body: wardMismatches.map(x => `<div class="review-line-wrap"><div class="review-line clickable" data-flag="ward_mismatch" data-llg="${esc(x.llg)}" data-ward="${esc(x.ward)}" data-title="Ward Name Not in Official List \u2014 ${esc(x.llg)} \u201c${esc(x.ward)}\u201d"><span class="k">${esc(x.llg)} \u2014 "${esc(x.ward)}"</span><span class="v">${x.count} record(s)</span></div><span class="clickable remind-link" data-remind-category="ward_mismatch" data-remind-llg="${esc(x.llg)}" data-remind-ward="${esc(x.ward)}">Send Reminder</span></div>`).join('')
-  });
-
-  sections.push({
-    title: 'Missing Date Collected',
-    count: r.missing_date_collected || 0,
-    severity: (r.missing_date_collected || 0) > 0 ? 'warn' : 'ok',
-    body: '',
-    wholeCardFlag: (r.missing_date_collected || 0) > 0 ? 'missing_date_collected' : null
-  });
-  sections.push({
-    title: 'Missing Village',
-    count: r.missing_village || 0,
-    severity: (r.missing_village || 0) > 0 ? 'warn' : 'ok',
-    body: '',
-    wholeCardFlag: (r.missing_village || 0) > 0 ? 'missing_village' : null
-  });
-
-  // Only wards with 80%+ of their own range already collected are shown -
-  // a ward barely started isn't "missing" hundreds of numbers, it just
-  // hasn't been reached yet. This surfaces genuine gaps worth following up
-  // on, not ordinary survey-in-progress coverage.
-  sections.push({
-    title: 'Missing Household Numbers (in mostly-complete wards)',
-    count: missingHousehold.reduce((sum, w) => sum + w.missing_numbers.length, 0),
-    severity: missingHousehold.length > 0 ? 'warn' : 'ok',
-    body: missingHousehold.length === 0 ? '' : `<p style="font-size:12.5px; color:var(--text-muted); margin-bottom:8px;">These wards have collected 80%+ of their household range but have specific gaps in the sequence — worth checking whether that household was missed or simply hasn't been reached.</p>` +
-      missingHousehold.map(w => {
-        const shown = w.missing_numbers.slice(0, 15);
-        const extra = w.missing_numbers.length - shown.length;
-        const fullList = w.missing_numbers.join(', ');
-        return `<div class="review-line-wrap"><div class="review-line" style="align-items:flex-start;"><span class="k">${esc(w.llg)} \u2014 ${esc(w.ward)} <span style="color:var(--text-muted); font-weight:400;">(${w.record_count}/${w.max_household} collected)</span></span><span class="v hh-missing-list" style="text-align:right; max-width:55%;" data-shown="${esc(shown.join(', '))}" data-full="${esc(fullList)}">${shown.join(', ')}${extra > 0 ? ` <span class="clickable" style="color:var(--primary-dark); text-decoration:underline; font-weight:700;" data-expand-hh="1">+${extra} more</span>` : ''}</span></div><span class="clickable remind-link" data-remind-category="missing_household" data-remind-llg="${esc(w.llg)}" data-remind-ward="${esc(w.ward)}" data-remind-numbers="${esc(w.missing_numbers.join(','))}">Send Reminder</span></div>`;
-      }).join('')
-  });
-
-  const totalIssues = sections.reduce((sum, s) => sum + s.count, 0);
-  const colorFor = sev => sev === 'bad' ? 'var(--danger)' : sev === 'warn' ? 'var(--accent-dark)' : 'var(--primary)';
-
-  let html = `<div class="warn-box" style="background:${totalIssues > 0 ? 'var(--accent-light)' : 'var(--success-light)'}; color:${totalIssues > 0 ? '#8A4A05' : 'var(--success)'};">
-    ${totalIssues === 0 ? 'No data quality issues currently detected.' : `${totalIssues} record(s) across all categories below are worth a second look.`}
-  </div>`;
-
-  html += sections.map(s => `
-    <div class="review-block card ${s.wholeCardFlag ? 'clickable' : ''}" style="border-left:3px solid ${colorFor(s.severity)};" ${s.wholeCardFlag ? `data-flag="${esc(s.wholeCardFlag)}" data-title="${esc(s.title)}"` : ''}>
-      <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:${s.body ? '8px' : '0'};">
-        <h4 style="margin:0;">${esc(s.title)}</h4>
-        <span style="font-family:var(--font-mono); font-weight:700; color:${colorFor(s.severity)};">${s.count}</span>
-      </div>
-      ${s.body}
-    </div>
-  `).join('');
-
-  container.innerHTML = html;
-  $all('#dataquality-content .review-line.clickable[data-id]').forEach(el => {
-    el.addEventListener('click', () => openDetail(el.dataset.id));
-  });
-  $all('#dataquality-content [data-flag]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation(); // a sub-row's own click must not also fire its parent card's whole-card handler
-      goToFlaggedRecords(el.dataset.flag, el.dataset.llg, el.dataset.ward, el.dataset.title);
+async function renderDQWards() {
+  const container = $('#dataquality-content');
+  container.innerHTML = skeletonRows(4);
+  try {
+    const { data, error } = await sb.rpc('get_dq_summary_by_ward', { p_district: myDistrict, p_llg: dqDrillLLG });
+    if (error) throw error;
+    const rows = data || [];
+    const officialWards = WARDS_BY_LLG[dqDrillLLG] || [];
+    let html = `<div class="review-line clickable" data-back="llgs" style="font-size:13px; font-weight:700; color:var(--primary-dark); padding:6px 0;">‹ Back to LLGs</div>`;
+    html += `<h3 style="margin:8px 0 10px;">${esc(dqDrillLLG)}</h3>`;
+    if (rows.length === 0) {
+      html += `<div class="empty-state"><div class="icon">✅</div><p>No data quality issues in this LLG.</p></div>`;
+    } else {
+      html += rows.map(r => {
+        const isUnofficial = officialWards.length > 0 && !officialWards.includes(r.ward);
+        return `<div class="review-line clickable card" data-ward="${esc(r.ward)}"><span class="k">${esc(r.ward)}${isUnofficial ? ' <span style="color:var(--danger); font-size:11px; font-weight:700;">⚠ not on official list</span>' : ''}</span><span class="v" style="font-family:var(--font-mono); font-weight:700; color:${r.total > 0 ? 'var(--accent-dark)' : 'var(--primary)'};">${r.total}</span></div>`;
+      }).join('');
+    }
+    container.innerHTML = html;
+    $('[data-back]', container).addEventListener('click', () => goToDQ('llgs'));
+    $all('[data-ward]', container).forEach(el => {
+      el.addEventListener('click', () => goToDQ('detail', dqDrillLLG, el.dataset.ward));
     });
-  });
-  $all('#dataquality-content [data-expand-hh]').forEach(el => {
-    el.addEventListener('click', () => {
-      const parent = el.closest('.hh-missing-list');
-      if (parent) parent.textContent = parent.dataset.full;
+  } catch (e) {
+    console.error('Failed to load Data Quality ward summary:', e);
+    container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Could not load — check your connection.</p>
+      <button class="btn btn-outline" id="btn-retry-dq">Retry</button></div>`;
+    const retryBtn = $('#btn-retry-dq');
+    if (retryBtn) retryBtn.addEventListener('click', renderDataQuality);
+  }
+}
+
+async function renderDQWardDetail() {
+  const container = $('#dataquality-content');
+  container.innerHTML = skeletonRows(4);
+  try {
+    const { data, error } = await sb.rpc('get_dq_detail_for_ward', { p_district: myDistrict, p_llg: dqDrillLLG, p_ward: dqDrillWard });
+    if (error) throw error;
+    const d = data || {};
+    const officialWards = WARDS_BY_LLG[dqDrillLLG] || [];
+    const isUnofficial = officialWards.length > 0 && !officialWards.includes(dqDrillWard);
+    const bracketLabel = (kind, b) => {
+      const t = { a: '<K60,000', b: 'K60,001–250,000', c: 'K250,001–5,000,000', d: '>K5,000,000' };
+      const e = { '1': '<K5,000', '2': 'K5,001–250,000', '3': 'K250,001–500,000', '4': '>K500,001' };
+      return kind === 'turnover' ? t[b] : e[b];
+    };
+
+    let html = `<div class="review-line clickable" data-back="wards" style="font-size:13px; font-weight:700; color:var(--primary-dark); padding:6px 0;">‹ Back to ${esc(dqDrillLLG)}</div>`;
+    html += `<h3 style="margin:8px 0 4px;">${esc(dqDrillWard)}</h3>`;
+    html += `<p style="font-size:12px; color:var(--text-muted); margin:0 0 14px;">${esc(myDistrict)} \u2014 ${esc(dqDrillLLG)}</p>`;
+
+    if (isUnofficial) {
+      html += `<div class="card" style="border-left:3px solid var(--danger); margin-bottom:12px;">
+        <h4 style="margin:0 0 8px;">Ward Name Not in Official List</h4>
+        <p style="font-size:12.5px; margin-bottom:8px;">"${esc(dqDrillWard)}" doesn't match this LLG's official ward list.</p>
+        <span class="clickable remind-link" data-remind-category="ward_mismatch" data-remind-llg="${esc(dqDrillLLG)}" data-remind-ward="${esc(dqDrillWard)}">Send Reminder</span>
+      </div>`;
+    }
+    if (d.missing_status > 0) {
+      html += `<div class="card" style="border-left:3px solid var(--accent-dark); margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><h4 style="margin:0;">Missing Business Status</h4><span style="font-family:var(--font-mono); font-weight:700; color:var(--accent-dark);">${d.missing_status}</span></div>
+        <span class="clickable remind-link" data-remind-category="missing_status" data-remind-llg="${esc(dqDrillLLG)}" data-remind-ward="${esc(dqDrillWard)}">Send Reminder</span>
+      </div>`;
+    }
+    if ((d.negative_cash_crops || []).length > 0) {
+      html += `<div class="card" style="border-left:3px solid var(--danger); margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><h4 style="margin:0;">Negative Cash Crop Values</h4><span style="font-family:var(--font-mono); font-weight:700; color:var(--danger);">${d.negative_cash_crops.length}</span></div>
+        ${d.negative_cash_crops.map(x => `<div class="review-line clickable" data-id="${esc(x.id)}"><span class="k">HH ${esc(x.household_no || '—')} · ${esc(x.crop)}</span><span class="v" style="color:var(--danger);">${esc(x.field)}: ${esc(x.value)}</span></div>`).join('')}
+      </div>`;
+    }
+    if ((d.turnover_mismatches || []).length > 0) {
+      html += `<div class="card" style="border-left:3px solid var(--accent-dark); margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><h4 style="margin:0;">Turnover Doesn\u2019t Match Bracket</h4><span style="font-family:var(--font-mono); font-weight:700; color:var(--accent-dark);">${d.turnover_mismatches.length}</span></div>
+        ${d.turnover_mismatches.map(x => `<div class="review-line clickable" data-id="${esc(x.id)}"><span class="k">HH ${esc(x.household_no || '—')}</span><span class="v">K${Number(x.amount).toLocaleString()} in "${esc(bracketLabel('turnover', x.bracket))}"</span></div>`).join('')}
+      </div>`;
+    }
+    if ((d.expenses_mismatches || []).length > 0) {
+      html += `<div class="card" style="border-left:3px solid var(--accent-dark); margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><h4 style="margin:0;">Expenses Doesn\u2019t Match Bracket</h4><span style="font-family:var(--font-mono); font-weight:700; color:var(--accent-dark);">${d.expenses_mismatches.length}</span></div>
+        ${d.expenses_mismatches.map(x => `<div class="review-line clickable" data-id="${esc(x.id)}"><span class="k">HH ${esc(x.household_no || '—')}</span><span class="v">K${Number(x.amount).toLocaleString()} in "${esc(bracketLabel('expenses', x.bracket))}"</span></div>`).join('')}
+      </div>`;
+    }
+    if (d.missing_date > 0 || d.missing_village > 0) {
+      html += `<div class="card" style="border-left:3px solid var(--accent-dark); margin-bottom:12px;">
+        <div class="review-line"><span class="k">Missing Date Collected</span><span class="v" style="font-family:var(--font-mono); font-weight:700;">${d.missing_date || 0}</span></div>
+        <div class="review-line" style="border-bottom:none;"><span class="k">Missing Village</span><span class="v" style="font-family:var(--font-mono); font-weight:700;">${d.missing_village || 0}</span></div>
+      </div>`;
+    }
+    if ((d.missing_household_numbers || []).length > 0) {
+      html += `<div class="card" style="border-left:3px solid var(--accent-dark); margin-bottom:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;"><h4 style="margin:0;">Missing Household Numbers</h4><span style="font-family:var(--font-mono); font-weight:700; color:var(--accent-dark);">${d.missing_household_numbers.length}</span></div>
+        <p style="font-size:13px; margin-bottom:8px;">${d.missing_household_numbers.join(', ')}</p>
+        <span class="clickable remind-link" data-remind-category="missing_household" data-remind-llg="${esc(dqDrillLLG)}" data-remind-ward="${esc(dqDrillWard)}" data-remind-numbers="${esc(d.missing_household_numbers.join(','))}">Send Reminder</span>
+      </div>`;
+    }
+
+    const totalHere = (d.missing_status || 0) + (d.negative_cash_crops || []).length + (d.turnover_mismatches || []).length + (d.expenses_mismatches || []).length + (d.missing_date || 0) + (d.missing_village || 0) + (d.missing_household_numbers || []).length;
+    if (totalHere === 0 && !isUnofficial) {
+      html += `<div class="empty-state"><div class="icon">✅</div><p>No data quality issues for this ward.</p></div>`;
+    }
+
+    container.innerHTML = html;
+    $('[data-back]', container).addEventListener('click', () => goToDQ('wards', dqDrillLLG));
+    $all('.review-line.clickable[data-id]', container).forEach(el => {
+      el.addEventListener('click', () => openDetail(el.dataset.id));
     });
-  });
-  $all('#dataquality-content [data-remind-category]').forEach(el => {
-    el.addEventListener('click', (e) => {
-      e.stopPropagation();
-      goToCompose({
-        category: el.dataset.remindCategory,
-        llg: el.dataset.remindLlg || null,
-        ward: el.dataset.remindWard || null,
-        numbers: el.dataset.remindNumbers ? el.dataset.remindNumbers.split(',').map(Number) : null,
+    $all('[data-remind-category]', container).forEach(el => {
+      el.addEventListener('click', (e) => {
+        e.stopPropagation();
+        goToCompose({
+          category: el.dataset.remindCategory,
+          llg: el.dataset.remindLlg || null,
+          ward: el.dataset.remindWard || null,
+          numbers: el.dataset.remindNumbers ? el.dataset.remindNumbers.split(',').map(Number) : null,
+        });
       });
     });
-  });
+  } catch (e) {
+    console.error('Failed to load Data Quality ward detail:', e);
+    container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Could not load — check your connection.</p>
+      <button class="btn btn-outline" id="btn-retry-dq">Retry</button></div>`;
+    const retryBtn = $('#btn-retry-dq');
+    if (retryBtn) retryBtn.addEventListener('click', renderDataQuality);
+  }
 }
-$('#btn-open-dataquality').addEventListener('click', () => switchView('dataquality'));
+$('#btn-open-dataquality').addEventListener('click', () => {
+  dqDrillLevel = 'llgs'; dqDrillLLG = null; dqDrillWard = null;
+  switchView('dataquality');
+});
 $('#btn-dataquality-back').addEventListener('click', () => switchView('dashboard'));
 $('#btn-compose-general').addEventListener('click', () => goToCompose());
 
