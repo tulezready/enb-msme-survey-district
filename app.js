@@ -240,6 +240,7 @@ let stepIndex = 0;
 let currentView = 'dashboard';
 let myDistrict = null; // this login's own district, fetched right after sign-in - the whole app's scope depends on it
 let currentDetailId = null; // tracks which record is open, so back/forward can restore it
+let detailReturnView = 'records'; // which view "back" should return to - wherever openDetail was actually called from
 
 // Real Android/iOS back-gesture support: every meaningful navigation change
 // pushes a browser history entry describing exactly where the person is, so
@@ -252,7 +253,8 @@ function captureNavState() {
     view: currentView,
     drillLevel: recordsDrillLevel, drillDistrict: recordsDrillDistrict, drillLLG: recordsDrillLLG, drillWard: recordsDrillWard,
     flaggedCategory, flaggedLLG, flaggedWard, flaggedTitle,
-    detailId: currentDetailId,
+    detailId: currentDetailId, detailReturnView,
+    dqDrillLevel, dqDrillLLG, dqDrillWard,
   };
 }
 function pushNavState() {
@@ -287,6 +289,10 @@ async function restoreNavState(state) {
     flaggedLLG = state.flaggedLLG || null;
     flaggedWard = state.flaggedWard || null;
     flaggedTitle = state.flaggedTitle || null;
+    detailReturnView = state.detailReturnView || 'records';
+    dqDrillLevel = state.dqDrillLevel || 'llgs';
+    dqDrillLLG = state.dqDrillLLG || null;
+    dqDrillWard = state.dqDrillWard || null;
     if (state.view === 'detail' && state.detailId) {
       await openDetail(state.detailId);
     } else {
@@ -1432,7 +1438,21 @@ async function renderRecordsSummary() {
 }
 
 /* -------------------------------- detail view ------------------------------- */
+// Human-readable label for the back button, matching wherever detailReturnView
+// actually points - so someone opened from Data Quality sees "Back to Data
+// Quality", not a generic "Back to records" that doesn't match what happens.
+function detailReturnViewLabel(view) {
+  const labels = { records: 'records', dataquality: 'Data Quality', dashboard: 'dashboard' };
+  return labels[view] || 'records';
+}
+
 async function openDetail(id) {
+  // Remember where "back" should return to - wherever the person actually
+  // came from (records list, data quality, flagged records, etc.), not a
+  // fixed destination. If we're already in detail (opening a different
+  // record from within one), keep the original return view rather than
+  // overwriting it with 'detail' itself.
+  if (currentView !== 'detail') detailReturnView = currentView;
   currentDetailId = id;
   let r = recordsCache.find(x => x.id === id);
   if (!r) {
@@ -1523,10 +1543,10 @@ async function openDetail(id) {
       </div>
     </div>
     ${sections}
-    <button class="btn btn-outline btn-full" id="btn-detail-back">← Back to records</button>
+    <button class="btn btn-outline btn-full" id="btn-detail-back">\u2190 Back to ${esc(detailReturnViewLabel(detailReturnView))}</button>
   `;
   $('#btn-detail-edit').onclick = () => editRecord(r.id);
-  $('#btn-detail-back').onclick = () => switchView('records');
+  $('#btn-detail-back').onclick = () => switchView(detailReturnView);
   $('#btn-detail-export').onclick = () => downloadFile(`msme-${recordDisplayName(r).replace(/[,\s]+/g,'-')}.json`, JSON.stringify(r, null, 2), 'application/json');
   $('#btn-detail-print').onclick = () => { window.print(); };
 }
@@ -2095,7 +2115,10 @@ async function saveDraftRecord() {
   clearDraft();
   stopAutosaveInterval();
   toast(editingExisting ? 'Record updated' : 'Record saved');
-  switchView('dashboard');
+  // Editing an existing record should return to wherever it was opened
+  // from (Data Quality, records list, etc.) - only a brand-new record
+  // falls back to the dashboard, since there's no "came from" to return to.
+  switchView(editingExisting ? detailReturnView : 'dashboard');
 }
 
 /* -------------------------------- transfer -------------------------------- */
