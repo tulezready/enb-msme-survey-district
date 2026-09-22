@@ -81,6 +81,20 @@ const SUPABASE_URL = 'https://lgfdzxcawggxrqvsgzpz.supabase.co';
 const SUPABASE_ANON_KEY = 'sb_publishable_cX_rXW51KpL-k9arZupk9w_6MS9Jlo_';
 const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY, { auth: { storageKey: 'sb-enb-district-auth' } });
 
+async function rpcWithRetry(name, params, maxAttempts = 3) {
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    const { data, error } = await sb.rpc(name, params);
+    if (!error) return { data, error: null };
+    lastError = error;
+    console.warn(`RPC "${name}" failed (attempt ${attempt}/${maxAttempts}):`, error.message || error);
+    if (attempt < maxAttempts) {
+      await new Promise(resolve => setTimeout(resolve, attempt * 900)); // 900ms, then 1800ms
+    }
+  }
+  return { data: null, error: lastError };
+}
+
 const BUSINESS_ACTIVITIES = {
   general: { label: 'Commerce & Services', items: ['Trade store','Wholesale','Fast food outlet','Second hand clothing shop','Liquor / Bottle shop','Bakery','Service station','PMV / Transport / Taxi services','Pest Control','Professional services (accountancy/consultancy)','Tailoring','Coffin Making','Mechanical Workshop','Contracting services','Communication Towers'] },
   dpi: { label: 'DPI — Agriculture & Livestock', items: ['Cocoa Buying / Cocoa dealer','Livestock / Poultry / Cattle','Fresh produce','Cocoa/coconut nursery'] },
@@ -1207,25 +1221,49 @@ async function renderRecordsSummary() {
   const scopeWard = renderRecordsSummary._ward || null;
   const scopeOfficialWards = scopeLLG ? (WARDS_BY_LLG[scopeLLG] || []) : null;
 
-  let s;
-  try {
-    const { data, error } = await sb.rpc('get_summary_stats', {
-      weeks_back: 8, p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard, p_official_wards: scopeOfficialWards
-    });
-    if (error) throw error;
-    s = data;
-  } catch (e) {
-    console.error('Failed to load summary:', e);
-    container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Could not load summary — check your connection.</p>
+  // Four independent calls instead of one large one - each is individually
+  // faster, and critically, a failure in one no longer takes the whole
+  // screen down. Run together for speed; core is essential (everything
+  // else is built around total/by_status), the other three degrade
+  // gracefully - a missing section shows an honest note, not a blank page.
+  // (Matches the fix already proven on HQ - District was calling the old,
+  // single, large get_summary_stats the whole time, never actually receiving
+  // this half of that fix, which is why the same failure kept showing up.)
+  const [coreResult, businessResult, developmentResult, cropsResult] = await Promise.allSettled([
+    rpcWithRetry('get_summary_core', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard, p_official_wards: scopeOfficialWards }),
+    rpcWithRetry('get_summary_business', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
+    rpcWithRetry('get_summary_development', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
+    rpcWithRetry('get_summary_crops_trend', { weeks_back: 8, p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
+  ]);
+
+  const coreOk = coreResult.status === 'fulfilled' && !coreResult.value.error;
+  if (!coreOk) {
+    console.error('Failed to load summary core:', coreResult.status === 'rejected' ? coreResult.reason : coreResult.value.error);
+    container.innerHTML = `<div class="empty-state"><div class="icon">⚠️</div><p>Could not load summary after a few attempts — check your connection.</p>
       <button class="btn btn-outline" id="btn-retry-summary">Retry</button></div>`;
     const retryBtn = $('#btn-retry-summary');
     if (retryBtn) retryBtn.addEventListener('click', renderRecordsSummary);
     return;
   }
 
+  const failedSections = [];
+  const businessOk = businessResult.status === 'fulfilled' && !businessResult.value.error;
+  const developmentOk = developmentResult.status === 'fulfilled' && !developmentResult.value.error;
+  const cropsOk = cropsResult.status === 'fulfilled' && !cropsResult.value.error;
+  if (!businessOk) { failedSections.push('Business & Employment'); console.error('Failed to load summary business section:', businessResult.status === 'rejected' ? businessResult.reason : businessResult.value.error); }
+  if (!developmentOk) { failedSections.push('Development & Economic'); console.error('Failed to load summary development section:', developmentResult.status === 'rejected' ? developmentResult.reason : developmentResult.value.error); }
+  if (!cropsOk) { failedSections.push('Cash Crops & Trend'); console.error('Failed to load summary crops/trend section:', cropsResult.status === 'rejected' ? cropsResult.reason : cropsResult.value.error); }
+
+  const s = {
+    ...coreResult.value.data,
+    ...(businessOk ? businessResult.value.data : {}),
+    ...(developmentOk ? developmentResult.value.data : {}),
+    ...(cropsOk ? cropsResult.value.data : {}),
+  };
+
   let marketPrices = {};
   try {
-    const { data: mpData, error: mpError } = await sb.rpc('get_market_price_summary');
+    const { data: mpData, error: mpError } = await rpcWithRetry('get_market_price_summary', {});
     if (mpError) throw mpError;
     marketPrices = mpData || {};
   } catch (e) {
@@ -1234,7 +1272,7 @@ async function renderRecordsSummary() {
 
   let priceComparison = [];
   try {
-    const { data: pcData, error: pcError } = await sb.rpc('get_price_comparison');
+    const { data: pcData, error: pcError } = await rpcWithRetry('get_price_comparison', {});
     if (pcError) throw pcError;
     priceComparison = pcData || [];
   } catch (e) {
