@@ -538,6 +538,63 @@ body.locked .topbar, body.locked .bottomnav{ display:none; }
   body{padding-bottom:0; -webkit-print-color-adjust:exact; print-color-adjust:exact;}
   .chart-fill, .badge, .status-tag, .stat-card, .card, .donut, .stacked-seg{-webkit-print-color-adjust:exact; print-color-adjust:exact;}
 }
+
+/* survey progress vs total households */
+.hh-progress{margin-top:6px;}
+.hh-track{height:8px; background:var(--surface-2); border-radius:4px; overflow:hidden;}
+.hh-fill{height:100%; background:var(--primary); border-radius:4px;}
+.hh-progress.over .hh-fill{background:var(--accent-dark);}
+.hh-label{font-size:12.5px; color:var(--text-muted); margin-top:3px; font-variant-numeric:tabular-nums;}
+.hh-progress.over .hh-label{color:var(--accent-dark);}
+.hh-rows{display:flex; flex-direction:column; gap:12px; margin-top:16px;}
+.hh-row-label{font-size:14px; font-weight:600;}
+.hh-of{font-size:12.5px; color:var(--text-muted); font-weight:400;}
+.hh-note{font-size:12px; color:var(--text-muted); margin-top:8px;}
+@media print{ .hh-fill{-webkit-print-color-adjust:exact; print-color-adjust:exact;} }
+/* business directory (opened from the Summary's Formal / Informal cards) */
+.dir-hint{font-size:11.5px; font-weight:600; color:var(--primary); margin-top:6px;}
+.stat-card.accent .dir-hint{color:var(--accent-dark);}
+#biz-dir{position:fixed; inset:0; z-index:900; background:var(--bg); overflow-y:auto; -webkit-overflow-scrolling:touch;}
+#biz-dir[hidden]{display:none;}
+body.dir-open{overflow:hidden;}
+.dir-head{position:sticky; top:0; z-index:2; display:flex; align-items:center; justify-content:space-between; gap:12px;
+  background:var(--primary-dark); color:#fff; padding:12px 16px calc(12px) 16px;}
+.dir-title{font-family:var(--font-display); font-size:18px; font-weight:700;}
+.dir-scope{font-size:12.5px; opacity:.85;}
+.dir-head .dir-close{background:transparent; color:#fff; border-color:rgba(255,255,255,.5); flex-shrink:0;}
+.dir-body{max-width:860px; margin:0 auto; padding:14px 16px calc(40px + var(--safe-bottom));}
+.dir-tools{display:flex; flex-direction:column; gap:8px; margin-bottom:6px;}
+.dir-search{width:100%; border:1px solid var(--border); border-radius:var(--radius); padding:11px 12px; background:var(--surface); font-size:15px;}
+.dir-actions{display:flex; gap:8px; flex-wrap:wrap;}
+.dir-actions .btn{flex:1; min-width:140px;}
+.dir-count{font-size:12.5px; color:var(--text-muted); margin:6px 0 10px;}
+.dir-group{background:var(--surface); border:1px solid var(--border); border-radius:var(--radius); margin-bottom:8px; overflow:hidden;}
+.dir-group > summary{display:flex; align-items:center; gap:10px; padding:11px 14px; font-weight:600; color:var(--primary-dark); list-style:none;}
+.dir-group > summary::-webkit-details-marker{display:none;}
+.dir-group > summary::before{content:'›'; font-size:18px; line-height:1; color:var(--text-muted); transition:transform .15s; display:inline-block; width:10px;}
+.dir-group[open] > summary::before{transform:rotate(90deg);}
+.dir-glabel{flex:1; min-width:0; overflow-wrap:anywhere;}
+.dir-gcount{font-size:12px; font-weight:700; background:var(--primary-light); color:var(--primary-dark); border-radius:20px; padding:2px 9px; flex-shrink:0;}
+.dir-list{list-style:none; margin:0; padding:0; border-top:1px solid var(--border);}
+.dir-row{padding:9px 14px 9px 34px; border-bottom:1px solid var(--border); cursor:pointer;}
+.dir-row:last-child{border-bottom:none;}
+.dir-row:hover{background:var(--surface-2);}
+.dir-main{font-weight:600; color:var(--text); overflow-wrap:anywhere;}
+.dir-meta{font-size:12.5px; color:var(--text); opacity:.85; overflow-wrap:anywhere;}
+.dir-meta:empty{display:none;}
+.dir-place{font-size:12px; color:var(--text-muted);}
+@media print{
+  body.dir-open > *:not(#biz-dir){display:none !important;}
+  body.dir-open{overflow:visible;}
+  #biz-dir{position:static; overflow:visible; background:#fff;}
+  .dir-head{position:static; background:#fff; color:var(--text); border-bottom:2px solid var(--primary); padding:0 0 8px;}
+  .dir-head .dir-close, .no-print{display:none !important;}
+  .dir-body{max-width:none; padding:8px 0;}
+  .dir-group{break-inside:auto; box-shadow:none;}
+  .dir-group > summary::before{display:none;}
+  .dir-row{padding-left:14px; break-inside:avoid;}
+}
+@media print{ .no-print{display:none !important;} }
 </style>
 </head>
 <body data-role="hq">

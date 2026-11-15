@@ -324,6 +324,35 @@ function $(sel, root) { return (root || document).querySelector(sel); }
 function $all(sel, root) { return Array.from((root || document).querySelectorAll(sel)); }
 function esc(s) { return (s === undefined || s === null) ? '' : String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
+const fmtNum = (n) => (Number(n) || 0).toLocaleString('en-US');
+// Total households in each LLG, supplied by the Division of Commerce & Industry
+// (29 Oct 2026). Used only to show survey progress: records collected ÷ these totals.
+// Update here if the Division revises a figure.
+const LLG_HOUSEHOLDS = {
+  'Central Gazelle Rural': 10574, 'Inland Baining Rural': 5892, 'Lassul Baining Rural': 1959, 'Open Bay Rural': 1013,
+  'Livuan Rural': 3709, 'Reimber Rural': 3401, 'Toma Rural': 3707, 'Vunadidir Rural': 3172,
+  'Bitapaka Rural': 3841, 'Duke of York Rural': 3426, 'Kokopo-Vunamami Urban': 5322, 'Raluana Rural': 2960,
+  'Central Pomio Rural': 1979, 'Inland Pomio Rural': 1950, 'East Pomio Rural': 1472, 'Melkoi Rural': 2629,
+  'Sinivit Rural': 3317, 'West Pomio Rural': 2123, 'Mamusi Rural': 1997,
+  'Balanataman Rural': 4837, 'Kombiu Rural': 2263, 'Rabaul Urban': 928, 'Watom Island Rural': 650
+};
+function districtHouseholds(district) {
+  return (LLG_BY_DISTRICT[district] || []).reduce((sum, llg) => sum + (LLG_HOUSEHOLDS[llg] || 0), 0);
+}
+// "1,234 of 3,401 households · 36%" with a thin bar. Over 100% is shown as it is
+// (not capped) and flagged, because it usually means duplicate entries.
+function householdProgressHTML(recorded, totalHouseholds) {
+  if (!totalHouseholds) return '';
+  const n = Number(recorded) || 0;
+  const pct = n / totalHouseholds;
+  const over = pct > 1;
+  return `<div class="hh-progress${over ? ' over' : ''}">
+    <div class="hh-track"><div class="hh-fill" style="width:${Math.min(100, Math.round(pct * 100))}%"></div></div>
+    <div class="hh-label">${fmtNum(n)} of ${fmtNum(totalHouseholds)} households · ${Math.round(pct * 100)}%${over ? ' — more records than households; check for duplicates' : ''}</div>
+  </div>`;
+}
+
+
 const PREFERS_REDUCED_MOTION = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
 
 // Background photo slideshow - free, keyless image API, no external
@@ -608,8 +637,9 @@ async function renderDashboard() {
     const { data, error } = await sb.rpc('get_llg_overview', { p_district: myDistrict, p_official_llgs: officialLLGs });
     if (error) throw error;
     const rows = data || [];
-    dEl.innerHTML = rows.map(r => `
-      <div class="review-line clickable" data-llg="${esc(r.llg)}"><span class="k">${esc(r.llg)}</span><span class="v">${r.total}</span></div>
+    const districtTotal = rows.reduce((sum, r) => sum + (Number(r.total) || 0), 0);
+    dEl.innerHTML = `<div class="hh-note" style="margin:0 0 10px;">${esc(myDistrict)} District progress</div>${householdProgressHTML(districtTotal, districtHouseholds(myDistrict))}<div style="height:12px"></div>` + rows.map(r => `
+      <div class="review-line clickable" data-llg="${esc(r.llg)}"><span class="k">${esc(r.llg)}</span><span class="v">${fmtNum(r.total)}${LLG_HOUSEHOLDS[r.llg] ? ` <span class="hh-of">of ${fmtNum(LLG_HOUSEHOLDS[r.llg])} · ${Math.round((Number(r.total) || 0) / LLG_HOUSEHOLDS[r.llg] * 100)}%</span>` : ''}</span></div>
     `).join('');
     $all('#district-breakdown .review-line').forEach(el => {
       el.addEventListener('click', () => goToLLGWards(el.dataset.llg));
@@ -748,13 +778,13 @@ function renderBreadcrumb() {
   }));
 }
 
-function drillRowHTML(label, total, lastUploaded, colorDot) {
+function drillRowHTML(label, total, lastUploaded, colorDot, totalHouseholds) {
   const isRecent = lastUploaded && (Date.now() - new Date(lastUploaded).getTime()) < 48 * 60 * 60 * 1000;
   const dateLine = lastUploaded
     ? `<div class="drill-recent${isRecent ? '' : ' drill-older'}"><span class="dot"></span>Last uploaded: ${fmtDate(lastUploaded)}</div>`
     : `<div class="drill-recent drill-none">No uploads yet</div>`;
   return `<div class="record-item drill-row" data-value="${esc(label)}">
-    <div class="info"><strong>${colorDot || ''}${esc(label)}</strong>${dateLine}</div>
+    <div class="info"><strong>${colorDot || ''}${esc(label)}</strong>${dateLine}${householdProgressHTML(total, totalHouseholds)}</div>
     <div class="stacked-total-badge">${total}</div>
     <div class="chev">›</div>
   </div>`;
@@ -783,7 +813,7 @@ async function renderLLGLevel() {
     const { data, error } = await sb.rpc('get_llg_overview', { p_district: recordsDrillDistrict, p_official_llgs: officialLLGs });
     if (error) throw error;
     const rows = data || [];
-    container.innerHTML = rows.map(r => drillRowHTML(r.llg, r.total, r.last_uploaded)).join('');
+    container.innerHTML = rows.map(r => drillRowHTML(r.llg, r.total, r.last_uploaded, '', LLG_HOUSEHOLDS[r.llg])).join('');
     $all('.drill-row', container).forEach(el => el.addEventListener('click', () => drillInto('wards', recordsDrillDistrict, el.dataset.value)));
   } catch (e) {
     console.error('Failed to load LLG overview:', e);
@@ -1091,6 +1121,64 @@ function priceComparisonCardHTML(priceComparison, marketPrices, cashCrops) {
   </div>`;
 }
 
+// Estimated annual turnover: recorded monthly amounts x 12 (server-side, get_summary_turnover).
+// Brackets are not annualised - only exact amounts are used. Entries the server treats as
+// entry errors (K1m+/month, or above the record's own bracket) are left out and counted.
+function annualTurnoverHTML(t, areaWord) {
+  if (!t) return '';
+  const f = t.formal || {}, inf = t.informal || {};
+  const total = (Number(f.annual_total) || 0) + (Number(inf.annual_total) || 0);
+  const n = (Number(f.count) || 0) + (Number(inf.count) || 0);
+  if (n === 0) {
+    return `<div class="review-block card"><h4>E. Estimated Annual Turnover</h4><p style="font-size:14px; color:var(--text-muted);">No monthly turnover amounts recorded in this area yet.</p></div>`;
+  }
+  const k = v => 'K' + fmtNum(Math.round(Number(v) || 0));
+  const areaBlock = areaWord && (t.by_area || []).length > 1 ? (() => {
+    const max = Math.max(1, ...t.by_area.map(a => Number(a.annual) || 0));
+    const rows = t.by_area.map(a => {
+      const pct = Math.round((Number(a.annual) || 0) / max * 100);
+      return `<div class="chart-row">
+        <div class="chart-label">${esc(a.label)} <span style="color:var(--text-muted); font-size:12px;">(${fmtNum(a.count)})</span></div>
+        <div class="chart-track"><div class="chart-fill" style="width:${pct}%"></div></div>
+        <div class="chart-value">${esc(k(a.annual))}</div>
+      </div>`;
+    }).join('');
+    return `<h4 style="margin-top:16px;">By ${esc(areaWord)}</h4>${rows}`;
+  })() : '';
+  return `<div class="review-block card">
+    <h4>E. Estimated Annual Turnover</h4>
+    <p style="font-size:13px; color:var(--text-muted); margin-bottom:10px;">Monthly turnover amounts recorded in the survey &times; 12. Only exact amounts are used; brackets can&rsquo;t be turned into a yearly figure. Figures are estimates.</p>
+    <div class="stat-grid" style="grid-template-columns:repeat(2,1fr);">
+      <div class="stat-card accent" style="grid-column:1 / -1;"><div class="num">${k(total)}</div><div class="lbl">Estimated annual turnover<br><span style="font-weight:400; font-size:12px;">from ${fmtNum(n)} business(es) with an amount</span></div></div>
+      <div class="stat-card"><div class="num">${k(f.annual_total)}</div><div class="lbl">Formal businesses<br><span style="font-weight:400; font-size:12px;">${fmtNum(f.count)} with an amount &middot; typical ${f.annual_median != null ? k(f.annual_median) : '—'}/yr</span></div></div>
+      <div class="stat-card"><div class="num">${k(inf.annual_total)}</div><div class="lbl">Informal activities<br><span style="font-weight:400; font-size:12px;">${fmtNum(inf.count)} with an amount &middot; typical ${inf.annual_median != null ? k(inf.annual_median) : '—'}/yr</span></div></div>
+    </div>
+    ${areaBlock}
+    ${t.excluded ? `<p style="font-size:12.5px; color:var(--text-muted); margin-top:10px;">${fmtNum(t.excluded)} amount(s) left out as likely entry errors (K1,000,000+ a month, or above the bracket ticked on the same record). See Data Quality to correct them.</p>` : ''}
+  </div>`;
+}
+
+// Survey progress against the Division's household totals, at the summary's scope.
+function householdCoverageHTML(s, total, scopeDistrict, scopeLLG, scopeWard) {
+  if (scopeWard) return ''; // no household totals at ward level yet
+  const recs = row => (Number(row.formal) || 0) + (Number(row.informal) || 0) + (Number(row.none) || 0) + (Number(row.unknown) || 0);
+  let headTotal, rows = [];
+  if (scopeLLG) {
+    headTotal = LLG_HOUSEHOLDS[scopeLLG] || 0;
+  } else if (scopeDistrict) {
+    headTotal = districtHouseholds(scopeDistrict);
+    rows = (s.by_llg || []).map(r => [r.label, recs(r), LLG_HOUSEHOLDS[r.label] || 0]);
+  }
+  if (!headTotal) return '';
+  const rowsHTML = rows.map(([label, n, hh]) => `<div class="hh-row"><div class="hh-row-label">${esc(label)}</div>${householdProgressHTML(n, hh)}</div>`).join('');
+  return `<div class="review-block card">
+    <h4>Survey Progress — Households Reached</h4>
+    <p style="font-size:13px; color:var(--text-muted); margin-bottom:10px;">Records collected against the total households in each area, as supplied by the Division.</p>
+    ${householdProgressHTML(total, headTotal)}
+    ${rowsHTML ? `<div class="hh-rows">${rowsHTML}</div>` : ''}
+  </div>`;
+}
+
 function barBlockHTML(title, pairs, opts = {}) {
   const max = Math.max(1, ...pairs.map(([, v]) => Number(v) || 0));
   const rows = pairs.map(([label, value]) => {
@@ -1229,11 +1317,12 @@ async function renderRecordsSummary() {
   // (Matches the fix already proven on HQ - District was calling the old,
   // single, large get_summary_stats the whole time, never actually receiving
   // this half of that fix, which is why the same failure kept showing up.)
-  const [coreResult, businessResult, developmentResult, cropsResult] = await Promise.allSettled([
+  const [coreResult, businessResult, developmentResult, cropsResult, turnoverResult] = await Promise.allSettled([
     rpcWithRetry('get_summary_core', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard, p_official_wards: scopeOfficialWards }),
     rpcWithRetry('get_summary_business', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
     rpcWithRetry('get_summary_development', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
     rpcWithRetry('get_summary_crops_trend', { weeks_back: 8, p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
+    rpcWithRetry('get_summary_turnover', { p_district: scopeDistrict, p_llg: scopeLLG, p_ward: scopeWard }),
   ]);
 
   const coreOk = coreResult.status === 'fulfilled' && !coreResult.value.error;
@@ -1253,6 +1342,8 @@ async function renderRecordsSummary() {
   if (!businessOk) { failedSections.push('Business & Employment'); console.error('Failed to load summary business section:', businessResult.status === 'rejected' ? businessResult.reason : businessResult.value.error); }
   if (!developmentOk) { failedSections.push('Development & Economic'); console.error('Failed to load summary development section:', developmentResult.status === 'rejected' ? developmentResult.reason : developmentResult.value.error); }
   if (!cropsOk) { failedSections.push('Cash Crops & Trend'); console.error('Failed to load summary crops/trend section:', cropsResult.status === 'rejected' ? cropsResult.reason : cropsResult.value.error); }
+  const turnoverOk = turnoverResult.status === 'fulfilled' && !turnoverResult.value.error;
+  if (!turnoverOk) { failedSections.push('Annual Turnover'); console.error('Failed to load summary turnover section:', turnoverResult.status === 'rejected' ? turnoverResult.reason : turnoverResult.value.error); }
 
   const s = {
     ...coreResult.value.data,
@@ -1330,17 +1421,21 @@ async function renderRecordsSummary() {
     </div>
   </div>`;
 
-  let html = printHeader + scopeSelectorHTML + `<div class="warn-box">Summary for ${esc(scopeLabel)} — ${total} record(s), computed live from the server, updates automatically.</div>`;
+  let html = printHeader + scopeSelectorHTML + `<div class="warn-box">Summary for ${esc(scopeLabel)} — ${fmtNum(total)} record(s), computed live from the server, updates automatically.</div>`;
+  if (failedSections.length > 0) {
+    html += `<div class="warn-box" style="background:var(--accent-light); color:#8A4A05;">⚠️ Couldn't load: ${esc(failedSections.join(', '))}. The rest of the summary below is showing correctly — try refreshing to load the missing part(s).</div>`;
+  }
 
   html += marketPricesCardHTML(marketPrices);
 
   html += `<div class="stat-grid" id="summary-status-anchor">
     <div class="stat-card"><div class="num" data-countup="${total}">0</div><div class="lbl">Total surveyed</div></div>
-    <div class="stat-card accent"><div class="num" data-countup="${byStatus.formal}">0</div><div class="lbl">Formal business</div></div>
-    <div class="stat-card"><div class="num" data-countup="${byStatus.informal}">0</div><div class="lbl">Informal sector</div></div>
+    <div class="stat-card accent clickable" data-dir="formal" tabindex="0" role="button" title="Open the list of formal businesses"><div class="num" data-countup="${byStatus.formal}">0</div><div class="lbl">Formal business</div><div class="dir-hint no-print">View list ›</div></div>
+    <div class="stat-card clickable" data-dir="informal" tabindex="0" role="button" title="Open the list of informal businesses"><div class="num" data-countup="${byStatus.informal}">0</div><div class="lbl">Informal sector</div><div class="dir-hint no-print">View list ›</div></div>
     <div class="stat-card"><div class="num" data-countup="${byStatus.none}">0</div><div class="lbl">No business</div></div>
     ${byStatus.unknown ? `<div class="stat-card"><div class="num" data-countup="${byStatus.unknown}">0</div><div class="lbl">Status not recorded</div></div>` : ''}
   </div>`;
+  html += householdCoverageHTML(s, total, scopeDistrict, scopeLLG, scopeWard);
   html += donutChartHTML('Business Status Split', [
     { label: 'Formal', value: byStatus.formal, color: 'var(--primary)' },
     { label: 'Informal', value: byStatus.informal, color: 'var(--accent)' },
@@ -1404,6 +1499,7 @@ async function renderRecordsSummary() {
     </div>
   </div>`;
   html += barBlockHTML('F. Cash Crop Totals (blocks)', FIXED_CROPS.map(c => [`${c} (${(cashCrops[c] && cashCrops[c].trees) || 0} trees)`, (cashCrops[c] && cashCrops[c].blocks) || 0]));
+  html += annualTurnoverHTML(turnoverOk ? turnoverResult.value.data : null, scopeWard ? null : scopeLLG ? 'ward' : 'LLG');
   html += priceComparisonCardHTML(priceComparison, marketPrices, cashCrops);
   const informalActivities = (s.informal_activities || []).map(a => [a.label, a.count]);
   if (informalActivities.length) html += barBlockHTML('G. Informal Sector — Activity Types', informalActivities);
@@ -1414,6 +1510,11 @@ async function renderRecordsSummary() {
   activateCountUps(container);
   const printBtn = $('#btn-print-summary');
   if (printBtn) printBtn.addEventListener('click', () => window.print());
+  container.querySelectorAll('[data-dir]').forEach((card) => {
+    const open = () => openBusinessDirectory(card.dataset.dir, { district: scopeDistrict, llg: scopeLLG, ward: scopeWard });
+    card.addEventListener('click', open);
+    card.addEventListener('keydown', (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(); } });
+  });
 
   const scopeLLGSelect = $('#summary-scope-llg');
   if (scopeLLGSelect) scopeLLGSelect.addEventListener('change', (e) => {
@@ -2739,3 +2840,200 @@ window.addEventListener('online', () => setConnectionStatus(true));
 window.addEventListener('offline', () => setConnectionStatus(false));
 
 initLockScreen();
+
+/* ------------------------------ business directory ------------------------------ */
+// Opened from the Formal / Informal cards. Lists every business in the current
+// Summary area, grouped by business name, owner, activity or ward, with search,
+// print and CSV. Data comes from get_business_directory (runs as the signed-in
+// user, so RLS limits each district account to its own district's records).
+const DIR_ACTIVITY_GROUPS = [
+  ['Betelnut (buai)', /bu[a]?i|betel|bettle|beetle|betle|daka|mustard/i],
+  ['Smoke / tobacco', /brus|burus|smoke|tobac|cigar/i],
+  ['Cocoa', /cocoa|cacao|wet ?bean|dry ?bean/i],
+  ['Copra / coconut', /copra|coconut|kulau|coconut oil/i],
+  ['Coffee', /coffee/i],
+  ['Vanilla', /vanilla/i],
+  ['Fishing / seafood', /fish|sea ?cucumber|beche|shell|crab|prawn|lobster|seafood/i],
+  ['Poultry / livestock', /poultry|chicken|egg|pig|livestock|cattle|goat|duck/i],
+  ['Baking / cooked food', /bak|bread|scone|donut|doughnut|cook|food bar|fast ?food|snack|flour|cake|pancake/i],
+  ['Sewing / tailoring', /sew|tailor|meri blouse|laplap|cloth/i],
+  ['Trade store / canteen', /trade ?store|canteen|store goods|tucker|kiosk|shop/i],
+  ['Second-hand clothes', /second ?hand|2nd ?hand|bale/i],
+  ['Handicraft / bilum', /craft|bilum|basket|weav|carv|mat\b|mats/i],
+  ['Fuel / petrol', /fuel|petrol|diesel|kerosene/i],
+  ['Transport / PMV / boat', /pmv|transport|taxi|truck|dinghy|boat|banana boat|vehicle|hire car|bus/i],
+  ['Timber / sawmill / building', /saw|timber|carpent|build|join|furniture|blocks/i],
+  ['Peanuts', /peanut|galip|nut/i],
+  ['Garden produce / vegetables', /garden|vegetable|veggie|produce|taro|kaukau|sweet potato|banana|yam|greens|fruit|cabbage|pumpkin|aibika|corn|tapioca|cassava|watermelon|pineapple|kumu|sugar ?cane/i],
+  ['Market / sales (general)', /market|table|roadside|road side|black|sale|sell|vend|paddl|marketing|goods/i],
+  ['Services / repairs', /mechanic|repair|barber|hair|phone|charging|carpentry|electric|services|labour|labor|contract/i],
+];
+function dirActivityGroup(a) {
+  if (!a) return 'Not recorded';
+  for (const [label, re] of DIR_ACTIVITY_GROUPS) if (re.test(a)) return label;
+  return 'Other';
+}
+// Tidy a name for display and grouping: trim, collapse spaces, title case shouty entries.
+function dirNameTidy(s) {
+  if (!s) return '';
+  let t = String(s).replace(/\s+/g, ' ').trim();
+  if (t === t.toUpperCase() || t === t.toLowerCase()) t = t.toLowerCase().replace(/\b([a-z])/g, (m) => m.toUpperCase());
+  return t;
+}
+function dirKey(s) { return String(s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim(); }
+
+const bizDir = { status: null, rows: [], group: 'name', q: '', scope: {} };
+
+async function openBusinessDirectory(status, scope) {
+  bizDir.status = status;
+  bizDir.scope = scope || {};
+  bizDir.group = status === 'formal' ? 'name' : 'activity';
+  bizDir.q = '';
+  bizDir.rows = [];
+  let el = document.getElementById('biz-dir');
+  if (!el) {
+    el = document.createElement('div');
+    el.id = 'biz-dir';
+    el.setAttribute('role', 'dialog');
+    el.setAttribute('aria-modal', 'true');
+    document.body.appendChild(el);
+  }
+  document.body.classList.add('dir-open');
+  el.hidden = false;
+  const label = status === 'formal' ? 'Formal businesses' : 'Informal businesses';
+  el.innerHTML = `<div class="dir-head"><div><div class="dir-title">${label}</div><div class="dir-scope">${esc(dirScopeLabel())}</div></div>
+    <button class="btn btn-outline dir-close" id="dir-close" aria-label="Close">Close</button></div>
+    <div class="dir-body">${skeletonRows ? skeletonRows(6) : 'Loading…'}</div>`;
+  $('#dir-close').onclick = closeBusinessDirectory;
+  document.addEventListener('keydown', dirEsc);
+
+  const { data, error } = await rpcWithRetry('get_business_directory', {
+    p_status: status, p_district: bizDir.scope.district || myDistrict, p_llg: bizDir.scope.llg || null, p_ward: bizDir.scope.ward || null,
+  });
+  if (bizDir.status !== status || el.hidden) return;
+  if (error) {
+    el.querySelector('.dir-body').innerHTML = `<div class="warn-box">⚠️ Couldn't load the business list. Check the connection and try again.</div>`;
+    return;
+  }
+  bizDir.rows = (data || []).map((r) => {
+    const name = dirNameTidy(r.name);
+    const owner = dirNameTidy(status === 'formal' ? r.head : (r.own || r.head));
+    const actRaw = status === 'formal' ? [r.act, r.other].filter(Boolean).join(', ') : (r.act || '');
+    const tb = r.tb ? ((TURNOVER_BRACKETS.find((b) => b[0] === r.tb) || [])[1] || r.tb) : null;
+    const turn = r.turn ? r.turn.replace(/^\s*k\s*/i, '') : null;
+    return { ...r, name, owner, tb, turn, head: dirNameTidy(r.head), actRaw, actGroup: status === 'formal' ? (r.act ? r.act.split(', ')[0] : (r.other ? 'Other' : 'Not recorded')) : dirActivityGroup(r.act) };
+  });
+  renderBusinessDirectory();
+}
+function dirScopeLabel() {
+  const s = bizDir.scope;
+  return s.ward ? `${s.ward} ward, ${s.llg}` : s.llg ? `${s.llg} LLG` : `${s.district || myDistrict} District`;
+}
+function dirEsc(e) { if (e.key === 'Escape') closeBusinessDirectory(); }
+function closeBusinessDirectory() {
+  const el = document.getElementById('biz-dir');
+  if (el) { el.hidden = true; el.innerHTML = ''; }
+  document.body.classList.remove('dir-open');
+  document.removeEventListener('keydown', dirEsc);
+  bizDir.status = null;
+}
+
+function dirFiltered() {
+  const q = dirKey(bizDir.q);
+  if (!q) return bizDir.rows;
+  return bizDir.rows.filter((r) => dirKey([r.name, r.owner, r.head, r.actRaw, r.v, r.w, r.l, r.hh].join(' ')).includes(q));
+}
+function dirGroupKey(r) {
+  const g = bizDir.group;
+  if (g === 'name') return r.name || '(No business name recorded)';
+  if (g === 'owner') return r.owner || '(No owner name recorded)';
+  if (g === 'activity') return r.actGroup;
+  if (g === 'ward') return `${r.w || 'No ward'}${bizDir.scope.llg ? '' : ' — ' + (r.l || '')}`;
+  return '';
+}
+function dirSort(a, b) {
+  const blank = (s) => s.startsWith('(') || s === 'Not recorded' || s === 'Other';
+  if (blank(a) !== blank(b)) return blank(a) ? 1 : -1;
+  return a.localeCompare(b, 'en', { sensitivity: 'base' });
+}
+
+function renderBusinessDirectory() {
+  const el = document.getElementById('biz-dir');
+  if (!el || el.hidden) return;
+  const formal = bizDir.status === 'formal';
+  const rows = dirFiltered();
+  // Group (names are matched loosely so "JOHN TOBIAS" and "John  Tobias" land together).
+  const groups = new Map();
+  for (const r of rows) {
+    const label = dirGroupKey(r);
+    const k = label.startsWith('(') ? label : (bizDir.group === 'name' || bizDir.group === 'owner') ? dirKey(label) : label;
+    if (!groups.has(k)) groups.set(k, { label, items: [] });
+    groups.get(k).items.push(r);
+  }
+  const ordered = [...groups.values()].sort((a, b) => bizDir.group === 'activity' ? (b.items.length - a.items.length) || dirSort(a.label, b.label) : dirSort(a.label, b.label));
+  const chips = [['name', formal ? 'Business name' : null], ['owner', 'Owner'], ['activity', 'Activity'], ['ward', 'Ward']].filter((c) => c[1]);
+  const withName = formal ? bizDir.rows.filter((r) => r.name).length : 0;
+  const people = new Set(rows.map((r) => r.id)).size;
+
+  const rowHTML = (r) => {
+    const main = bizDir.group === 'name' ? (r.owner || '—') : bizDir.group === 'owner' ? (formal ? (r.name || r.actRaw || '—') : (r.actRaw || '—')) : (formal ? (r.name || r.owner || '—') : (r.owner || '—'));
+    const bits = [];
+    if ((bizDir.group !== 'activity' || !formal) && r.actRaw) bits.push(esc(r.actRaw));
+    if (formal && bizDir.group === 'activity' && r.owner && r.name) bits.push('Owner: ' + esc(r.owner));
+    if (!formal && r.head && r.owner && dirKey(r.head) !== dirKey(r.owner)) bits.push('Household: ' + esc(r.head));
+    if (formal && r.ipa) bits.push(r.ipa === 'yes' || r.ipa === 'Yes' || r.ipa === 'true' ? 'IPA registered' : 'IPA: ' + esc(r.ipa));
+    if (formal && r.tb) bits.push('Turnover: ' + esc(r.tb));
+    if (!formal && r.turn) bits.push('K' + esc(r.turn) + ' a month');
+    if (!formal && r.yr) bits.push('Since ' + esc(r.yr));
+    const place = [r.v, bizDir.group === 'ward' ? null : r.w, bizDir.scope.llg ? null : r.l].filter(Boolean).map(esc).join(', ');
+    return `<li class="dir-row" data-id="${esc(r.id)}" tabindex="0">
+      <div class="dir-main">${esc(main)}</div>
+      <div class="dir-meta">${bits.join(' · ')}</div>
+      <div class="dir-place">HH ${esc(r.hh || '—')}${place ? ' · ' + place : ''}</div></li>`;
+  };
+
+  const body = `
+    <div class="dir-tools no-print">
+      <input type="search" id="dir-search" class="dir-search" placeholder="Search name, owner, activity, village…" value="${esc(bizDir.q)}">
+      <div class="filter-chips" role="group" aria-label="Group by">${chips.map(([k, l]) => `<button class="chip${bizDir.group === k ? ' active' : ''}" data-dirgroup="${k}">${l}</button>`).join('')}</div>
+      <div class="dir-actions"><button class="btn btn-outline" id="dir-print">Print / Save as PDF</button><button class="btn btn-outline" id="dir-csv">Download CSV</button></div>
+    </div>
+    <div class="dir-count">${fmtNum(rows.length)} ${formal ? 'business' : 'activit'}${formal ? (rows.length === 1 ? '' : 'es') : (rows.length === 1 ? 'y' : 'ies')} in ${fmtNum(ordered.length)} group${ordered.length === 1 ? '' : 's'}${bizDir.q ? ` matching “${esc(bizDir.q)}”` : ''}${formal ? ` · ${fmtNum(withName)} of ${fmtNum(bizDir.rows.length)} have a business name recorded` : ` · from ${fmtNum(people)} household${people === 1 ? '' : 's'}`}</div>
+    ${ordered.length ? ordered.map((g) => `<details class="dir-group"${ordered.length <= 12 || bizDir.q ? ' open' : ''}>
+        <summary><span class="dir-glabel">${esc(g.label)}</span><span class="dir-gcount">${fmtNum(g.items.length)}</span></summary>
+        <ul class="dir-list">${g.items.slice().sort((a, b) => dirSort(a.owner || a.name || '~', b.owner || b.name || '~')).map(rowHTML).join('')}</ul></details>`).join('')
+      : `<div class="empty-state">No businesses ${bizDir.q ? 'match that search' : 'recorded in this area'}.</div>`}`;
+  const bodyEl = el.querySelector('.dir-body');
+  const hadFocus = document.activeElement && document.activeElement.id === 'dir-search';
+  bodyEl.innerHTML = body;
+  const search = $('#dir-search');
+  if (hadFocus) { search.focus(); search.setSelectionRange(search.value.length, search.value.length); }
+  let t = null;
+  search.addEventListener('input', (e) => { clearTimeout(t); t = setTimeout(() => { bizDir.q = e.target.value; renderBusinessDirectory(); }, 200); });
+  bodyEl.querySelectorAll('[data-dirgroup]').forEach((b) => b.onclick = () => { bizDir.group = b.dataset.dirgroup; renderBusinessDirectory(); });
+  $('#dir-print').onclick = () => { bodyEl.querySelectorAll('details').forEach((d) => d.open = true); window.print(); };
+  $('#dir-csv').onclick = downloadDirectoryCSV;
+  bodyEl.querySelectorAll('.dir-row').forEach((li) => {
+    const go = () => { const id = li.dataset.id; closeBusinessDirectory(); openDetail(id); };
+    li.onclick = go;
+    li.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  });
+}
+
+function downloadDirectoryCSV() {
+  const formal = bizDir.status === 'formal';
+  const head = formal
+    ? ['Business name', 'Owner / contact', 'Activities', 'IPA registered', 'Turnover bracket', 'Phone', 'Village', 'Ward', 'LLG', 'District', 'Household no.']
+    : ['Owner', 'Activity', 'Activity group', 'Monthly turnover (K)', 'Year started', 'Household head', 'Phone', 'Village', 'Ward', 'LLG', 'District', 'Household no.'];
+  const rows = dirFiltered().slice().sort((a, b) => dirSort(dirGroupKey(a), dirGroupKey(b)));
+  const lines = rows.map((r) => formal
+    ? [r.name, r.owner, r.actRaw, r.ipa, r.tb, r.ph, r.v, r.w, r.l, r.d, r.hh]
+    : [r.owner, r.actRaw, r.actGroup, r.turn, r.yr, r.head, r.ph, r.v, r.w, r.l, r.d, r.hh]);
+  const cell = (v) => { const s = v == null ? '' : String(v); return /[",\n]/.test(s) ? '"' + s.replace(/"/g, '""') + '"' : s; };
+  const csv = '﻿' + [head, ...lines].map((l) => l.map(cell).join(',')).join('\r\n');
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = `${formal ? 'Formal' : 'Informal'}-businesses-${dirScopeLabel().replace(/[^A-Za-z0-9]+/g, '-').replace(/-+$/, '')}.csv`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
